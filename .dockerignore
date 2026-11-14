@@ -1,0 +1,30 @@
+# 构建上下文只需要 src/ 和 tools/。其余一律排除，避免把几 GB 的实验产物塞进构建缓存。
+# 教训：有一版这里是 4.1GB 的上下文，因为同目录下别的项目留了 tmp/3d（3.7GB 模型文件）。
+tmp/
+swanlog/
+out_docker/
+out_img/
+.scratch/
+.pylibs/
+data/
+results/
+experiments/
+docs/
+.team/
+.tmp/
+__pycache__/
+.git/
+*.pyc
+*.csv
+*.npz
+*.pkl
+*.json
+*.md
+!README.md
+dist/
+
+# 注意：Docker 的 `*` 不跨目录，所以上面 `*.npz` 只挡根目录下的 npz，
+# harness/checkpoints/*.npz 本来就不会被排除。这里显式写一遍，是为了将来
+# 有人把规则改成 `**/*.npz` 时不会顺手把评测镜像的权重也挡掉。
+!harness/**/*.npz
+!harness/**/*.py

@@ -1,0 +1,10 @@
+# 运行时依赖：只有 numpy。
+# 评测镜像 zhipin:0.4 内为 numpy==1.26.4（python:3.11-slim 自带 pip 安装）。
+# 本文件用于在任意环境复现"评测时的运行"，装完即可跑 src/main.py。
+numpy==1.26.4
+
+# ---- 以下不是运行时依赖，装了也不会被 src/ 引用 ----
+# 开发期可选（模型选择对比实验 tools/probe_gbdt.py 需要）：
+# scikit-learn==1.9.1
+# 实验记录上传（tools/swanlog.py --mode cloud 需要；镜像内不安装）：
+# swanlab==0.10.4

@@ -1,0 +1,29 @@
+# 依赖与复现清单（与 README、Dockerfile、requirements.txt 对账用）
+# 生成时间 2026-11-06
+
+runtime:
+  python: "3.11"            # 评测镜像 python:3.11-slim；本机开发 3.12.14 同样通过
+  pip: [numpy==1.26.4]      # 唯一运行时依赖
+  system: "Linux (Docker) / Windows 开发机均可"
+  gpu_required: false
+  network_required: false   # 评测期全程离线，代码内无任何网络调用
+
+dev_optional:               # 不进入评测镜像
+  - scikit-learn==1.9.1     # 仅 tools/probe_gbdt.py（模型选择对比）
+  - swanlab==0.10.4         # 仅 tools/swanlog.py --mode cloud（实验记录上传）
+
+data:
+  source: "src/simulate_drift.py 合成生成（官方数据包到位后替换）"
+  files:
+    - data/synth_stream.csv    # 12 特征 / 4 段 / 12000 行 / 正例 8%
+    - data/g_pure.csv          # 纯概念漂移探测用
+  checksum_tool: "tools/make_baseline_ref.py 会写入 sha256"
+
+entrypoints:
+  main: "python src/main.py --data <csv>"
+  baseline: "python src/baseline.py --data <csv> --out experiments/baseline_static.json"
+  suite: "python tools/run_suite.py --seeds 0,1,2 --outroot results/suite3"
+
+reproducibility:
+  determinism: "同 seed 同数据 -> predictions.csv 逐字节一致（已验证，见 docs/image_verify.md E 项）"
+  seed_control: "--seed 同时控制数据切分与 mini-batch 采样顺序"
