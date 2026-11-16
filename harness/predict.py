@@ -18,6 +18,7 @@ import argparse
 import json
 import math
 import os
+import select
 import sys
 
 import numpy as np
@@ -80,18 +81,58 @@ def answer(model, inputs):
     }
 
 
+def iter_lines(idle_exit):
+    """Yield stdin lines; if ``idle_exit`` > 0, stop after that long with no input.
+
+    Default is 0 = read until EOF, which is exactly what the official
+    ``baselines/predict.py`` does (``for line in sys.stdin``).  That is also the
+    safest choice: if the judge closed stdin for the baseline it must close it
+    for us, so adding our own timer only creates a way to die first.  A timer
+    would also truncate a run where the judge streams in batches with gaps
+    longer than the timeout — incomplete output scores worse than slow output.
+
+    The knob is kept for the case where the judge is confirmed to write
+    everything and leave the pipe open: then ``--idle-exit 60`` lets us finish
+    instead of blocking, which the rules would score as our failure.
+
+    ``select`` works on pipes under Linux (the judged environment).  On Windows
+    local runs read files with a real EOF, so the plain loop is used there.
+    """
+    if idle_exit <= 0 or os.name == "nt":
+        for line in sys.stdin:
+            yield line
+        return
+    while True:
+        ready, _, _ = select.select([sys.stdin], [], [], idle_exit)
+        if not ready:
+            print("warn: stdin idle for %gs, exiting" % idle_exit,
+                  file=sys.stderr, flush=True)
+            return
+        line = sys.stdin.readline()
+        if not line:
+            return
+        yield line
+
+
 def main(argv=None):
     here = os.path.dirname(os.path.abspath(__file__))
     parser = argparse.ArgumentParser(description="route and answer A/B/C predictions")
     parser.add_argument("--checkpoints", default=os.path.join(here, "checkpoints"))
     parser.add_argument("--strict", action="store_true", help="crash on the first bad line")
+    parser.add_argument(
+        "--idle-exit",
+        type=float,
+        default=0.0,
+        help="exit after this many seconds with no stdin input; 0 (default) "
+             "reads until EOF, exactly like the official baselines/predict.py",
+    )
     args = parser.parse_args(argv)
 
     models = load_models(args.checkpoints)
     state = {}
     last_task = None
 
-    for line in sys.stdin:
+    for line in iter_lines(args.idle_exit):
         # Windows 上导出的文件常带 UTF-8 BOM（\ufeff），它不是空白字符，
         # strip() 删不掉，会让首行 json.loads 直接失败。这里先摘掉。
         line = line.lstrip("\ufeff")
@@ -129,7 +170,9 @@ def main(argv=None):
 
         outputs = payload["outputs"]
         if isinstance(outputs, list) and outputs:
-            top = outputs[0]["label"]
+            # outputs are emitted in a fixed class order, not sorted by score,
+            # so the top class must be found by max(score) rather than outputs[0].
+            top = max(outputs, key=lambda o: o["score"])["label"]
             stats["labels"][top] = stats["labels"].get(top, 0) + 1
 
         print(json.dumps(payload, allow_nan=False), flush=True)
