@@ -1,0 +1,64 @@
+{
+  "format": "contest.cpu-baseline-report.v1",
+  "profile": "C",
+  "task": "regression",
+  "purpose": "development_reference",
+  "official_scoring_ready": false,
+  "device": "cpu",
+  "cpu_threads_requested": 1,
+  "numpy_version": "2.3.5",
+  "python_version": "3.12.14",
+  "machine": "AMD64",
+  "stage_id": "round9_bs64",
+  "seed": 42,
+  "parameter_count": 833,
+  "input_features": 24,
+  "train_rows": 113089,
+  "validation_rows": 23049,
+  "train_sha256": "sha256:fcfaeaf1e50a0cc01766dfba5fd34c7369f1fe14bf583111837e847865fac281",
+  "validation_sha256": "sha256:0cc747f9998c5d7ee1e4eac6aec0db9f5ed4d2de149a1b1cbe689cce6b6aaca7",
+  "profile_sha256": "sha256:bbdfc7cac9cea81fe578db9ab1e1b398140723bb1c70353d9a9de4544187f4d3",
+  "parent_checkpoint_sha256": "sha256:08c0a40f647d780d42ccda2c739fc4da5742028d0bca8017993f46e127e1bdf9",
+  "checkpoint_sha256": "sha256:55256b82844097faf88aacb83c2746553eaaaa50547e2b64845a5e559a088914",
+  "initial_steps": 55250,
+  "initial_epochs": 125,
+  "final_steps": 90610,
+  "final_epochs": 145,
+  "training_seconds": 4.0,
+  "learning_rate": 0.006,
+  "batch_size": 64,
+  "validation_before": {
+    "mae": 37.10899329354222,
+    "rmse": 50.932031167420625
+  },
+  "validation_after": {
+    "mae": 37.50871789325095,
+    "rmse": 52.06196373154213
+  },
+  "configuration": {
+    "hidden": 32,
+    "activation": "tanh",
+    "optimizer": "Adam",
+    "adam_beta1": 0.9,
+    "adam_beta2": 0.999,
+    "adam_epsilon": 1e-08,
+    "gradient_clip_norm": 5.0,
+    "feature_clip": [
+      -10.0,
+      10.0
+    ],
+    "normalization": "initial_training_mean_std",
+    "learning_rate": 0.006,
+    "batch_size": 64,
+    "requested_epochs": 20,
+    "classes": []
+  },
+  "source_sha256": {
+    "model.py": "sha256:325026d80747eb36f39c8df1be02b640ae21b3cd082827c66aacbdf273dd61c5",
+    "data.py": "sha256:6099e312829ac3aaf48209ec1f618532c4a8552fedf73f09cf31c8876261db65",
+    "train.py": "sha256:77043a0a944efff434a690fbe4749e9fe5601c38f98e58df116a2ef6ba13ba0a",
+    "predict.py": "sha256:80e6787cd862dfefd85cd6bfcd73b5577dd90e202dd3d5bb9f18a52761807452"
+  },
+  "label_provenance": null,
+  "created_at": "2026-11-14T09:29:51.377290+00:00"
+}
