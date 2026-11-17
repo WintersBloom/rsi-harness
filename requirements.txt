@@ -1,5 +1,5 @@
 # 运行时依赖：只有 numpy。
-# 评测镜像 zhipin:0.4 内为 numpy==1.26.4（python:3.11-slim 自带 pip 安装）。
+# 评测镜像 zhixun-harness:sdk4 内为 numpy==1.26.4（python:3.11-slim 自带 pip 安装）。
 # 本文件用于在任意环境复现"评测时的运行"，装完即可跑 src/main.py。
 numpy==1.26.4
 

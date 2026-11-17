@@ -311,6 +311,6 @@ w15 从 F1 **0.1613 → 0.8085**。
 2. **"综合性能"口径未知**——不知道是 overall、分段、最差窗，还是评分表里的归一化增益 G。
 3. **末窗口径冲突**：plan 要求"三口径全为正"，但 edge 回滚到基线后末窗必然等于基线（0.00pp）。这是机制决定的，不是 bug，需要裁定。
 4. **断点续训未实现**——崩溃后从零重跑（幂等，结果一致），不是从断点继续。
-5. **镜像无法完整重建**——本机拉不到 `python:3.11-slim`，当前镜像是基于 `zhipin:0.1` 覆盖代码得到的（`Dockerfile.rebuild`）。需在能连 docker.io 的机器上重建并 `docker save` 留底。
-6. **SwanLab 未上传**——9 个 run 已离线生成，缺 API Key。
+5. ~~**镜像无法完整重建**~~ **已解决（11-15 晚）**——Docker Desktop 配好代理后可拉 python:3.11-slim；改离线 wheel 构建后 docker build --network none --no-cache 8.8 秒成功，docker run --network none 三包分数逐位一致。原始记录保留：当时镜像是基于 zhipin:0.1 覆盖代码得到的（Dockerfile.rebuild），需在能连 docker.io 的机器上重建并 docker save 留底。
+6. ~~**SwanLab 未上传**~~ **已解决（11-14）**——12 个 run 已上传并公开（9 个原型横评 + 3 条真实数据迭代线），见 https://swanlab.cn/@WintersBloom/zhipin-engine 。
 7. **统计口径**：n=3 的 `mean−std` 只是经验保守值；正式报告应补每 seed 原始值与配对检验。

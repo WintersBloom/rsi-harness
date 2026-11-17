@@ -1,6 +1,6 @@
 # 训练记录（父子链证明）
 
-这个目录放三条迭代线每一轮的 `training.json`（官方 `baselines/train.py` 自动生成），共 **26 份**：A 链 8 轮、B 链 6 轮、C 链 10 轮。
+这个目录放三条迭代线每一轮的 `training.json`（官方 `baselines/train.py` 自动生成），共 **26 份**：A 链 10 轮、B 链 6 轮、C 链 10 轮。
 
 ## 为什么放在这里
 

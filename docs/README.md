@@ -1,6 +1,6 @@
 # 文档索引
 
-这个目录有 13 份文档。**评审只需要看标「必读」的四份**，其余按需查。
+这个目录有 31 份文档。**评审只需要看标「必读」的四份**，其余按需查。
 
 ---
 
@@ -56,3 +56,23 @@ docker build -f Dockerfile -t zhixun-harness:1.3 .
 # 三包验证（需要官方 public/train.jsonl 与 validation.jsonl）
 python tools/verify_packs.py --checkpoints harness/checkpoints_trained
 ```
+
+## 之后新增（11-16 至 11-17，与上面的实验一一对应）
+
+| 文档 | 内容 |
+|---|---|
+| [扩展验证.md](扩展验证.md) | **必看**：用原始 batch3–10 模拟企业赛滚动场景；累积重训 0.7050、评估门反被证伪 0.5743、无约束对照 0.7345 为何不可提交 |
+| [A包_漂移方案v2.md](A包_漂移方案v2.md) | 参考方案复核：能复现 0.8381，但从零训练 + 改结构，合规上不可提交 |
+| [supcon移植实验.md](supcon移植实验.md) | SupCon / 马氏原型头 / 从头训 / robust 缩放四项，逐项多少 pp |
+| [输入标准化对照.md](输入标准化对照.md) | robust scaling 五组：单独最多 +0.54pp，作用是多训不崩 |
+| [f1_trigger.md](f1_trigger.md) | 用延迟 F1 兜底触发：3 seed 不稳（+9.08 / −1.81 / +8.79），默认关闭 |
+| [a_acetaldehyde.md](a_acetaldehyde.md) | 乙醛召回为什么恒为 0：跨批次 AUC 0.1137 方向翻转，六种救法全失败 |
+| [a_internal.md](a_internal.md) | A 包仅 445 条时的内部切分与噪声带 |
+| [a_embedding_distance.md](a_embedding_distance.md) | 逐条隐层距离判漂移：陌生度有效、错误定位失败 |
+| [drift_types.md](drift_types.md) | 协变量 / 概念 / 标签 / 虚拟四类漂移的定义与我们判据的边界 |
+| [tta_probe.md](tta_probe.md) | TTA 三种变体实测：动权重只换来 F1 假涨、AP 不动 |
+| [LLM驱动_官方数据实测.md](LLM驱动_官方数据实测.md) | 官方 A 包上 rule 0.7256 / hybrid 0.7126 / llm 0.6403，为什么更差 |
+| [省轮次对照.md](省轮次对照.md) | 策略层实测：R1/R2 第 5 轮停手，省 4 轮，终值不变 |
+| [pytrio接入.md](pytrio接入.md) | 官方端点实测：27B 关不掉思考、有效参数组合、未解决项 |
+| [提交说明.md](提交说明.md) | 评审入口：交了什么、每项在哪、怎么验 |
+| [要问官方的问题.md](要问官方的问题.md) | 尚未答复的官方口径问题清单 |
