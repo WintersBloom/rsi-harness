@@ -10,7 +10,7 @@ import subprocess
 import sys
 
 WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMG = "zhixun-harness:sdk5"
+IMG = "zhixun-harness:sdk6"
 
 # 官方数据不在本仓库里（版权与体积），需要外部提供：
 #   CONTEST_DATA=<含 official/ 的目录>  python tools/verify_sdk5_full.py

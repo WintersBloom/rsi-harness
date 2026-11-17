@@ -216,3 +216,29 @@ sdk5 的三处改动（`predict` 一行未动）：
 **验证**：`py_compile` 通过；假宿主 A/B/C 各两轮 exit=0，动作与 delta 与 sdk4 逐位一致（A `-0.02093671463440616` → `-0.008391168058790033`；B 两轮 `noop`；C `-0.062851972913478` → `noop`），`model_call_ids: 1`；`describe` 通过；`predict` 100 行与 1.3 基准 **100/100 相同**；三包全量 `--network none` → A 0.7210 / B 681.1598 / C 50.9320，与 sdk4 完全一致。
 
 镜像：`zhixun-harness:sdk5`，tar `dist/zhixun-harness-sdk5.tar`，90,505,216 B，sha256 `5EF48B1C75756DE5375529DC02D13D773B8EC7732CFBF7DAC0110E2D69A5C8CB`。
+
+### sdk6：把训练过程打成日志（stderr），不碰协议流（2026-11-17 晚）
+
+sdk5 只能把失败原因塞进 `change_summary` 的 240 个字符里。sdk6 改成"每轮都往 stderr 写一条结构化日志"。
+
+**为什么安全**：`contest_harness/cli.py` 的三个分支都是先 `isolate_stdio()`（`:51` / `:59` / `:71`）、**之后**才 `load_submission()`（`:53` / `:63` / `:73`）。而 `protocol.py:36-42` 的做法是：先 `os.dup(1)` 复制出私有句柄给协议帧，再 `os.dup2(2, 1)` —— 之后 fd1 就是 stderr。所以选手代码里的任何输出都落在 stderr，协议帧走另一份 fd。docstring 原话：*"Keep protocol frames on a private copy of stdout. Training logs use stderr."*
+
+实现上用 `_log()` 显式写 `sys.stderr` 并 flush，异常吞掉（日志失败绝不影响主流程）。打印的内容：
+
+| 时点 | 一行日志 |
+|---|---|
+| 轮次开始 | `[zhixun] start round=1 key=A rows=train:445,val:1244 cap=256 last=-` |
+| 决策完成 | `[zhixun] decide action=retrain_20 status=answered budget=256 call=call-local-0 reason=…` |
+| 训练完成 | `[zhixun] train epochs=20 before=F1 0.7210 after=F1 0.7000 accepted=False` |
+| 训练异常 | `[zhixun] train failed: KeyError: …` + 完整 `traceback.format_exc()` |
+| 提交前 | `[zhixun] submit artifact=… calls=1 fatal=0 elapsed=0.7s`，有 fatal 时再打一行 |
+
+**验证**（`zhixun-harness:sdk6`）：
+- `describe` 通过；
+- `predict` 100 行：stdout **100 行、每行 `json.loads` 成功、stderr 0 字节**；
+- 假宿主 A 一轮：stderr 出现上述四行，`model_call_ids: 1`，`change_summary` 与 sdk5 一致；
+- 三包全量 `--network none`：A 0.7210 / B 681.1598 / C 50.9320，与 sdk5 完全一致。
+
+镜像：`zhixun-harness:sdk6`，tar `dist/zhixun-harness-sdk6.tar`，90,507,264 B，sha256 `0469AD11C2B711A9523D6BC85D8BD2C2E0DCA925B2554152B6B630708CE1C0A3`。
+
+**未验证的前提**：平台是否把 stderr 收进运行报告，我们读不到（`/runs/{id}/logs` 是 404）。这版的价值是"如果平台收，我们就有全量轨迹；如果不收，代价为零"。

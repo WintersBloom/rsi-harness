@@ -20,10 +20,28 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import sys
 import time
+import traceback
 from pathlib import Path
 
 import numpy as np
+
+
+def _log(message: str) -> None:
+    """训练日志一律走 stderr。
+
+    SDK 在加载本模块**之前**就调用了 isolate_stdio()（cli.py:51/59/71）：
+    它先把原始 fd1 复制成私有句柄给协议帧用，再 dup2(2, 1)，所以此刻 fd1 就是
+    stderr，而协议帧走的是另一份 fd。这里显式写 sys.stderr，连"万一顺序变了"
+    也不会有风险。日志写失败绝不影响主流程。
+    """
+    try:
+        sys.stderr.write("[zhixun] " + str(message) + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
 
 # ---------- 经验表：策略迭代的载体 ----------
 
@@ -318,6 +336,9 @@ def run_round(rnd) -> dict:
         "last_failed": bool(last.get("failed", False)),
         "train_rows": len(train_rows),
     }
+    _log("start round=%s key=%s rows=train:%d,val:%d cap=%s last=%s"
+         % (rnd.round_index, key, len(train_rows), len(val_rows),
+            getattr(rnd, "max_output_tokens", None), evidence.get("last_action") or "-"))
 
     # ---- 2+3. 决策：规则给底，模型在候选名单内裁定 ----
     # B 包例外：官方 train_run 要求 label_provenance（train.py:53-60），我们没有官方认可的
@@ -345,6 +366,9 @@ def run_round(rnd) -> dict:
         reason = "模型调用失败（%s），本轮保留父模型" % type(exc).__name__
         llm_status = "error"
         call_id = None
+
+    _log("decide action=%s status=%s budget=%s call=%s reason=%s"
+         % (action, llm_status, llm_budget, (call_id or "-")[:12], (reason or "")[:120]))
 
     # ---- 4. 执行 ----
     candidate = work / "candidate"
@@ -382,6 +406,8 @@ def run_round(rnd) -> dict:
             after = report.get("validation_after") or {}
             metrics = {"before": before, "after": after}
             accepted = _better(key, after, before)
+            _log("train epochs=%s before=%s after=%s accepted=%s"
+                 % (epochs, _fmt(key, before), _fmt(key, after), accepted))
             src = out / "checkpoint.npz"
             if accepted:
                 shutil.copyfile(src, candidate / "checkpoint.npz")
@@ -393,6 +419,8 @@ def run_round(rnd) -> dict:
         # 训练失败：交父模型，别让这一轮白跑
         failed = True
         error = "%s: %s" % (type(exc).__name__, exc)
+        _log("train failed: " + error)
+        _log(traceback.format_exc())
         if parent is not None and (candidate / "checkpoint.npz").is_file() is False:
             shutil.copyfile(parent, candidate / "checkpoint.npz")
         reason = reason + f"（执行异常 {type(exc).__name__}: {exc}，已回退父模型）"
@@ -472,6 +500,12 @@ def run_round(rnd) -> dict:
             break
 
     save_experience(rnd, work, exp)
+
+    _log("submit artifact=%s calls=%d fatal=%d elapsed=%.1fs"
+         % ((submitted or {}).get("artifact_id", "none"),
+            len(rnd.call_ids), len(fatal), time.perf_counter() - t0))
+    if fatal:
+        _log("fatal: " + " | ".join(fatal)[:400])
 
     if submitted is None:
         raise RuntimeError("submit_candidate failed: " + (" | ".join(fatal))[:240])
