@@ -1,4 +1,4 @@
-"""Full validation run of the SDK image: sdk4, --network none, all rows.
+"""Full validation run of the SDK image: sdk5, --network none, all rows.
 
 Produces the numbers that go into README. Read-only w.r.t. repo.
 """
@@ -10,10 +10,10 @@ import subprocess
 import sys
 
 WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-IMG = "zhixun-harness:sdk4"
+IMG = "zhixun-harness:sdk5"
 
 # 官方数据不在本仓库里（版权与体积），需要外部提供：
-#   CONTEST_DATA=<含 official/ 的目录>  python tools/verify_sdk4_full.py
+#   CONTEST_DATA=<含 official/ 的目录>  python tools/verify_sdk5_full.py
 # 或把三包解到 ./data/official/ 下。找不到时给一条明确的报错，而不是 FileNotFoundError。
 DATA = os.environ.get("CONTEST_DATA") or os.path.join(WS, "data")
 PACKS = {
@@ -45,7 +45,7 @@ def main():
             print(
                 f"{key}: 找不到验证集 {path}\n"
                 f"    官方数据不在本仓库里。请设置 CONTEST_DATA 指向含 official/ 的目录：\n"
-                f"    CONTEST_DATA=/path/to/data python tools/verify_sdk4_full.py"
+                f"    CONTEST_DATA=/path/to/data python tools/verify_sdk5_full.py"
             )
             continue
         rows, answers = [], []

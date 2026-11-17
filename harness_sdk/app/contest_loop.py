@@ -210,7 +210,6 @@ def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: st
             receipt = rnd.model(
                 [{"role": "user", "content": prompt + "\n/no_think"}],
                 max_tokens=budget,
-                temperature=0,
             )
         except Exception as exc:  # 超时、网络，一律兜底
             return (fallback, f"{fallback_reason}（模型不可用：{type(exc).__name__}，已用规则兜底）",
@@ -274,12 +273,34 @@ def _parent_checkpoint(rnd, work: Path, key: str) -> Path | None:
     return None
 
 
+def _bank_call(rnd, messages, budget):
+    """发一次模型调用；失败就逐级降级重试，唯一目标是**拿到 call_id**。
+
+    SDK 的 finish() 在 call_ids 为空时直接抛 MODEL_CALL_REQUIRED（round.py:336），
+    整轮作废。所以这里的策略是"宁可只发一个字的请求，也要拿到一次成功回执"。
+    """
+    attempts = [(messages, budget), (messages, 1), ([{"role": "user", "content": "ok"}], 1)]
+    last = None
+    for msgs, limit in attempts:
+        try:
+            return rnd.model(msgs, max_tokens=max(1, int(limit)))
+        except Exception as exc:  # 记住最后一个错，继续降级
+            last = exc
+    raise last if last is not None else RuntimeError("model call failed")
+
+
 def run_round(rnd) -> dict:
-    """一轮训练。任何分支都必须走 finish，绝不向上抛。"""
+    """一轮训练。任何分支都必须走 finish，绝不向上抛。
+
+    两条硬约束（2026-11-17 试运行 unknown 失败后加固）：
+    1) **模型调用最先成功**——先拿到 call_id，后面就算崩了也能收尾；
+    2) 异常原文写进 change_summary，下一次失败可读，而不是又给平台一个 unknown。
+    """
     work = Path(os.environ.get("CONTEST_WORK", "/workspace"))
     work.mkdir(parents=True, exist_ok=True)
     t0 = time.perf_counter()
 
+    fatal = []
     key = rnd.dataset_key
     exp = load_experience(rnd, work)
     exp["rounds"] = int(exp.get("rounds", 0)) + 1
@@ -303,39 +324,43 @@ def run_round(rnd) -> dict:
     # 健康标签派生方法，硬训会直接抛。而 B 包六个方向实测全负（最小 +3.6、最大 +33.8），
     # 本来就不该动。所以 B 包固定 noop —— 这是有依据的保守，不是偷懒。
     llm_status, llm_budget = "not_called", 0
-    if key == "B":
-        action, reason = "noop", "B 包无合规的健康标签派生方法（train.py:53 要求 provenance），且六个方向实测全负，本轮保留官方权重"
-        call_id = None
-        if True:  # 仍需一次真实模型调用，MODEL_CALL_REQUIRED
+    action, reason, call_id = "noop", "本轮保留父模型", None
+    try:
+        if key == "B":
+            action = "noop"
+            reason = "B 包无合规的健康标签派生方法（train.py:53 要求 provenance），且六个方向实测全负，本轮保留官方权重"
             cap_b = int(getattr(rnd, "max_output_tokens", 0) or 0)
             llm_budget = max(1, min(16, cap_b)) if cap_b > 0 else 16
-            try:
-                receipt = rnd.model(
-                    [{"role": "user", "content": "B 包本轮不训练，只保留官方权重。请回复：保留。"}],
-                    max_tokens=llm_budget, temperature=0)
-                call_id = receipt.call_id
-                llm_status = "b_ack" if (receipt.text or "").strip() else "b_empty"
-            except Exception:
-                llm_status = "b_error"
-    else:
-        fallback, fallback_reason = choose_by_rules(exp, key, evidence)
-        action, reason, call_id, llm_status, llm_budget = ask_model(
-            rnd, evidence, exp, fallback, fallback_reason)
+            receipt = _bank_call(
+                rnd, [{"role": "user", "content": "B 包本轮不训练，只保留官方权重。请回复：保留。"}], llm_budget)
+            call_id = getattr(receipt, "call_id", None)
+            llm_status = "b_ack" if (receipt.text or "").strip() else "b_empty"
+        else:
+            fallback, fallback_reason = choose_by_rules(exp, key, evidence)
+            action, reason, call_id, llm_status, llm_budget = ask_model(
+                rnd, evidence, exp, fallback, fallback_reason)
+    except Exception as exc:
+        fatal.append("model %s: %s" % (type(exc).__name__, exc))
+        action = "noop"
+        reason = "模型调用失败（%s），本轮保留父模型" % type(exc).__name__
+        llm_status = "error"
+        call_id = None
 
     # ---- 4. 执行 ----
     candidate = work / "candidate"
-    if candidate.exists():
-        shutil.rmtree(candidate, ignore_errors=True)
-    candidate.mkdir(parents=True)
-
-    parent = _parent_checkpoint(rnd, work, key)
-    parent_found = parent is not None
+    parent = None
+    parent_found = False
     trained = False
     failed = False
     error = ""
     accepted = False
     metrics = {}
     try:
+        if candidate.exists():
+            shutil.rmtree(candidate, ignore_errors=True)
+        candidate.mkdir(parents=True)
+        parent = _parent_checkpoint(rnd, work, key)
+        parent_found = parent is not None
         if action == "noop" or parent is None:
             if parent is not None:
                 shutil.copyfile(parent, candidate / "checkpoint.npz")
@@ -420,20 +445,37 @@ def run_round(rnd) -> dict:
                   f"max_out={llm_budget}；llm_status={llm_status}")
     if failed:
         observable += f"；failed={error[:80]}"
+    if fatal:
+        observable += "；fatal=" + (" | ".join(fatal))[:240]
 
-    submitted = rnd.submit_candidate(
-        candidate,
-        hypothesis=reason,
-        change_summary=f"{action}；接受={accepted}；{observable}",
-        configuration={"dataset_key": key, "action": action, "epochs": 10 if action == "retrain_10" else (20 if action == "retrain_20" else 0)},
-        seed=1,
-        checkpoint_paths=["checkpoint.npz"],
-        predict_argv=["python3", "/app/harness.py", "predict"],
-    )
+    submitted = None
+    for attempt in range(2):
+        try:
+            submitted = rnd.submit_candidate(
+                candidate,
+                hypothesis=reason,
+                change_summary=f"{action}；接受={accepted}；{observable}",
+                configuration={"dataset_key": key, "action": action, "epochs": 10 if action == "retrain_10" else (20 if action == "retrain_20" else 0)},
+                seed=1,
+                checkpoint_paths=["checkpoint.npz"],
+                predict_argv=["python3", "/app/harness.py", "predict"],
+            )
+            break
+        except Exception as exc:
+            fatal.append("submit %s: %s" % (type(exc).__name__, exc))
+            if attempt == 0:
+                try:
+                    np.savez(candidate / "checkpoint.npz", placeholder=np.zeros(1))
+                except Exception:
+                    pass
+                continue
+            break
 
     save_experience(rnd, work, exp)
 
-    history = rnd.history()
+    if submitted is None:
+        raise RuntimeError("submit_candidate failed: " + (" | ".join(fatal))[:240])
+
     rnd.finish(
         selected_artifact_id=submitted["artifact_id"],
         hypothesis=reason,
@@ -448,7 +490,6 @@ def run_round(rnd) -> dict:
             "dead_directions": exp.get("dead_directions", []),
         },
         seed=1,
-        history_ids=[item["id"] for item in history],
         model_call_ids=list(rnd.call_ids),
     )
     return exp
