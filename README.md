@@ -22,11 +22,18 @@
 | B 轴承 RUL（RMSE ↓） | 681.16 | **681.16** | 不动。六个动作全使 RMSE 变大，主动保留官方权重（根因见 `docs/作品文档.md` 第三节：官方权重是它自己训练中最差的一轮） |
 | C 发动机 RUL（RMSE ↓） | 52.87 | **50.93** | −3.66% |
 
-分数由**提交镜像 sdk4 自己**在容器里跑出来，不是本地算的（`--network none`，全量 1244 / 1679 / 23049 行）：
+分数由**提交镜像 sdk4 自己**在容器里跑出来，不是本地算的（`--network none`，全量 1244 / 1679 / 23049 行，三包合计约 **40 秒**）：
 
-```powershell
-python tools/verify_sdk4_full.py     # 输出：A 0.7210 / B 681.1598 / C 50.9320
+```bash
+# 复现需要官方数据（不随仓库分发，版权与体积）。把 CONTEST_DATA 指向含 official/ 的目录：
+CONTEST_DATA=/path/to/data python tools/verify_sdk4_full.py
+# 输出：A 0.7210 / B 681.1598 / C 50.9320
+
+# 或者把三个包解到 ./data/official/ 下，直接跑：
+python tools/verify_sdk4_full.py
 ```
+
+没有数据时脚本不会抛 traceback，而是打印"官方数据不在本仓库里"并给出上面这行命令。
 
 另外与旧协议镜像 1.3 做了逐条比对：A/B/C 各 100 行 **100/100 完全相等**（两版共用同一份 `net.py` 与同一组权重，只有入口协议不同）。
 

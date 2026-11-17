@@ -11,10 +11,15 @@ import sys
 
 WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 IMG = "zhixun-harness:sdk4"
+
+# 官方数据不在本仓库里（版权与体积），需要外部提供：
+#   CONTEST_DATA=<含 official/ 的目录>  python tools/verify_sdk4_full.py
+# 或把三包解到 ./data/official/ 下。找不到时给一条明确的报错，而不是 FileNotFoundError。
+DATA = os.environ.get("CONTEST_DATA") or os.path.join(WS, "data")
 PACKS = {
-    "A": ("data/official/cpu-a-guide-20261110-v1/public/validation.jsonl", "classification"),
-    "B": ("data/official/cpu-b-rul-20261110-v1/public/validation.jsonl", "regression"),
-    "C": ("data/official/cpu-c-guide-20261110-v1/public/validation.jsonl", "regression"),
+    "A": ("official/cpu-a-guide-20261110-v1/public/validation.jsonl", "classification"),
+    "B": ("official/cpu-b-rul-20261110-v1/public/validation.jsonl", "regression"),
+    "C": ("official/cpu-c-guide-20261110-v1/public/validation.jsonl", "regression"),
 }
 
 
@@ -35,7 +40,14 @@ def macro_f1(y_true, y_pred, labels):
 
 def main():
     for key, (rel, task) in PACKS.items():
-        path = os.path.join(WS, rel)
+        path = os.path.join(DATA, rel)
+        if not os.path.exists(path):
+            print(
+                f"{key}: 找不到验证集 {path}\n"
+                f"    官方数据不在本仓库里。请设置 CONTEST_DATA 指向含 official/ 的目录：\n"
+                f"    CONTEST_DATA=/path/to/data python tools/verify_sdk4_full.py"
+            )
+            continue
         rows, answers = [], []
         with open(path, encoding="utf-8") as fh:
             for line in fh:
