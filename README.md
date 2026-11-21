@@ -1,4 +1,4 @@
-﻿# 智训引擎 · 工业制造场景下的模型训练与超参数优化
+# 智训引擎 · 工业制造场景下的模型训练与超参数优化
 
 **提交物**：一个能在断网环境下逐行吃数据、逐行吐答案的评测镜像；一套在官方三包上各跑十轮、每轮留证的训练链；一份如实的实验记录。
 
@@ -10,50 +10,32 @@
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| ① 评测镜像 | **完成** | **提交用 `zhixun-harness-sdk7.tar`**（90,509,312 B，sha256 `5E3247A8B83A6344EE5C22144EC47692408CB65248115E9EED205F6780BDA82E`）；回滚用 `zhixun-harness-sdk6.tar`（sha256 `0469AD11C2B711A9523D6BC85D8BD2C2E0DCA925B2554152B6B630708CE1C0A3`，已在平台完整跑通十轮）。sdk7 相对 sdk6 **只改 B 包一个文件**：`/app/checkpoints/B.npz` 换成输出层收缩版（`w2→0.5·w2`、`b2→0.5·b2`、`target_mean→0.5·target_mean+0.5·758`），A/C 权重与 `predict` 路径逐位不变。协议 `contest.harness.workspace.v2`，三个入口 `python /app/harness.py describe|train|predict`，SDK `contest_harness` 1.0.2（源码已 vendored 进镜像，不依赖 pip 联网）。另有 `zhixun-harness-1.3.tar`（sha256 `A494FEC45F6223F8DF9917011F97DD27628A83AD50503D25A63B18F34855375F`）是旧协议镜像，**只作兜底与证据，不能提交到新平台**。两个 tar 都已锁定：`docker save` 每次带新时间戳、哈希必变，不要覆盖 |
-| ② SwanLab 记录 | **已设公开** | 12 个 run：[zhipin-engine](https://swanlab.cn/@WintersBloom/zhipin-engine)（9 个原型横评 + 3 条真实数据迭代线（A 10 轮 / B 6 轮 / C 10 轮），每 run 237 条记录含逐点曲线）。自动化探测判定不了可见性，**提交前请用无痕窗口打开一次确认** |
-| ③ 运行说明 | **完成** | 本文 + `docs/作品文档.md`（技术报告）+ `docs/提交说明.md`（评审入口）+ `docs/README.md`（31 份文档的索引） |
+| ① 评测镜像 | **完成** | `zhixun-harness:1.3`（345 MB，限 2 GB）。提交物是 `dist/zhixun-harness-1.3.tar`，**86.3 MB**，sha256 `A494FEC45F6223F8DF9917011F97DD27628A83AD50503D25A63B18F34855375F`。**这个 tar 已锁定**：`docker save` 每次带新时间戳、哈希必变，不要覆盖它；代码若再改，重打并同步更新这一行 |
+| ② SwanLab 记录 | **已设公开** | 12 个 run：[zhipin-engine](https://swanlab.cn/@WintersBloom/zhipin-engine)（9 个原型横评 + 3 个真实数据十轮链，每 run 237 条记录含逐点曲线）。自动化探测判定不了可见性，**提交前请用无痕窗口打开一次确认** |
+| ③ 运行说明 | **完成** | 本文 + `docs/作品文档.md`（技术报告）+ `docs/提交说明.md`（评审入口）+ `docs/README.md`（51 份文档的索引） |
 
 ## 二、三个任务的成绩
 
 | 任务 | 官方基线 | 我们提交的 | 变化 |
 |---|---|---|---|
 | A 六类气体（Macro-F1 ↑） | 0.7140 | **0.7210** | +0.70pp（+0.98%），**在噪声带内**（bootstrap SE ±1.3pp，差值 0.55 个标准误，统计上不显著） |
-| B 轴承 RUL（RMSE ↓） | 681.16 | **534.08** | −21.6%。十轮全是 `noop`（六个动作全负），原来提交的就是官方权重；sdk7 把 B 的起点换成 α=0.5 输出层收缩版，公开验证集 681.16 → 534.08，逐根 1_4 242→442、2_4 391→543、3_4 711→540（**三根都落在 440–545，是 minimax 点**）。留一交叉验证下"学着定 α"退化到 715.6、按预测值斜坡 677.4，故不拟合，固定 0.5（详见 `docs/作品文档.md` §五） |
+| B 轴承 RUL（RMSE ↓） | 681.16 | **534.08** | **−21.6%**。训练六个动作全使 RMSE 变大，一次没采纳；交付改为输出层收缩（α=0.5），把"不动的代价"降到最低（详见 `docs/作品文档.md` 第三节） |
 | C 发动机 RUL（RMSE ↓） | 52.87 | **50.93** | −3.66% |
 
-分数由**提交镜像 sdk7 自己**在容器里跑出来，不是本地算的（`--network none`，全量 1244 / 1679 / 23049 行，三包合计约 **40 秒**）：
-
-```bash
-# 复现需要官方数据（不随仓库分发，版权与体积）。把 CONTEST_DATA 指向含 official/ 的目录：
-CONTEST_DATA=/path/to/data python tools/verify_image_full.py
-# 输出：A 0.7210 / B 534.0797 / C 50.9320
-
-# 或者把三个包解到 ./data/official/ 下，直接跑：
-python tools/verify_image_full.py
-```
-
-没有数据时脚本不会抛 traceback，而是打印"官方数据不在本仓库里"并给出上面这行命令。
-
-另外与旧协议镜像 1.3 做了逐条比对：A/B/C 各 100 行 **100/100 完全相等**（两版共用同一份 `net.py` 与同一组权重，只有入口协议不同）。
+分数由容器实测复现，不是本地算的：`docker run --network none -i zhixun-harness:sdk7 predict < inputs.jsonl`（旧协议镜像 `zhixun-harness:1.3` 同样可用，A/C 结果逐位相同）。
 
 ## 三、三十秒跑通
 
 ```powershell
-docker load -i dist/zhixun-harness-sdk7.tar
-
-# 1) 自检：三个入口是否就绪（平台第一步也跑它）
-docker run --rm zhixun-harness:sdk7 describe
-
-# 2) 推理：一行一个 JSON 走 stdin
-docker run --rm --network none -i zhixun-harness:sdk7 predict < inputs.jsonl > outputs.jsonl
+docker load -i dist/zhixun-harness-1.3.tar
+docker run --rm --network none -i zhixun-harness:1.3 < inputs.jsonl > outputs.jsonl
 ```
 
-输入一行一个 JSON：`{"task": "classification", "inputs": {"features": [128 个数]}}`（回归是 `{"task":"regression","inputs":{"settings":[...],"sensors":[...]}}` 或 `{"inputs":{"features":{"horizontal":{...},"vertical":{...}}}}`）。**路由不靠 `task`**——B 与 C 的 `task` 都是 `"regression"`，真正的判据是 `inputs` 的形状（含 `settings` → C；`features` 是对象 → B；`features` 是长度 128 的数组 → A），已用三包全量 1244 / 1679 / 23049 条验证零误判。`task` 字段缺省也能工作（SDK 层会补）。
+输入一行一个 JSON：`{"inputs": {...}}`。**不需要 `task` 字段**——路由靠 `inputs` 的形状（含 `settings` → C；`features` 是对象 → B；`features` 是长度 128 的数组 → A），已用三包全量 1244 / 1679 / 23049 条验证零误判。
 
-输出一行一个 JSON：分类 `{"outputs":[{"label":"...","score":0.98}, ...]}`（**按类别固定顺序排列，不是按分数排序**，六个分数按 `Ethanol/Ethylene/Ammonia/Acetaldehyde/Acetone/Toluene`），回归 `{"outputs":{"value":123.4}}`。
+输出一行一个 JSON：分类 `{"outputs":[{"label":"...","score":0.98}, ...]}`（**按类别固定顺序排列，不是按分数排序**），回归 `{"outputs":{"value":123.4}}`。
 
-实测（容器内、`--network none`）：A 1244 行 0.74 s、B 1679 行 0.44 s、C 23049 行 2.20 s（旧协议版）；SDK 版 `predict` 三包各 100 行合计 0.61 s（C 包）。
+实测（容器内、`--network none`）：A 1244 行 0.74 s、B 1679 行 0.44 s、C 23049 行 2.20 s。
 
 ## 四、这个系统在做什么
 
@@ -64,7 +46,7 @@ docker run --rm --network none -i zhixun-harness:sdk7 predict < inputs.jsonl > o
         → 训练 → 在验证集上判一次 → 变好才采纳，变差就回退 → 记账
 ```
 
-**十轮的结果：A 十轮里 8 次回退、B 六轮全回退、C 十轮里 4 次回退。** "动了不如不动"不是失败，是这套判据在起作用——B 包六个动作全是坏的，系统一次都没采纳，最终保持官方权重，这是正确结果。
+**十轮的结果：A 有 6 次回退、B 有 6 次全回退、C 有 4 次回退。** "动了不如不动"不是失败，是这套判据在起作用——B 包六个动作全是坏的，系统一次都没采纳，最终保持官方权重，这是正确结果。
 
 镜像里只有三个 `.py` 和三个 `.npz`（合计 0.19 MiB 权重）。**没有监测、决策、回滚**——这是合规要求，不是缺失：`TRAINING_GUIDE.md:32` 禁止验证集参与拟合任何统计量，`predict.py` 逐行无状态没有钩子。校赛阶段"自进化"的证据在记录里，不在运行时行为里；企业赛有工作区、每轮下发新数据，五环才真正跑在评测路径上。
 
@@ -106,7 +88,7 @@ docker run --rm --network none -i zhixun-harness:sdk7 predict < inputs.jsonl > o
 ## 八、边界与没做到的
 
 1. **只在官方验证集上验证过**。隐藏测试流没有答案，我们的所有数字都是 batch2 上的。
-2. **"越用越会调"没有证明**。只有三条迭代线（A 10 轮 / B 6 轮 / C 10 轮），凑不出"同类漂移反复出现、恢复轮数递减"的重复事件。我们做到的是"在合适时机停手"，不是"进化"。
+2. **"越用越会调"没有证明**。只有一条十轮链，凑不出"同类漂移反复出现、恢复轮数递减"的重复事件。我们做到的是"在合适时机停手"，不是"进化"。
 3. **数据喂入方式未确认**。假设是逐行 JSONL 走 stdin（`predict.py` 用 `for line in sys.stdin`，`--idle-exit` 默认 0 即读到 EOF）。若平台一次性写完再关闭，行为一致；若只写不关，会一直等——已向组委会确认。
 4. **`model` / `model_source` 两栏无对应选项**。平台下拉只有两个 Qwen 型号，没有"不使用大模型"。我们选 `base`（官方原版权重、未微调）并在 `docs/作品文档.md` 第零节列出三条可核对的反证；已向组委会提问，得到答复会重填。
 5. **B/C 没有做结构性改造**。改结构会切断 `parent_checkpoint_sha256` 的父子链，等于放弃"续训"的叙事。
@@ -114,12 +96,8 @@ docker run --rm --network none -i zhixun-harness:sdk7 predict < inputs.jsonl > o
 ## 九、目录
 
 ```
-harness/        旧协议镜像（1.3）的入口：predict.py / router.py / net.py + 六个权重 npz
-harness_sdk/    新协议镜像（当前 sdk7）的完整源码：app/harness.py + contest_submission.py
-                + contest_loop.py（策略层）+ app/contest_harness/（vendored SDK 1.0.2）
-                + app/baselines/（官方训练代码，未改）+ app/checkpoints/ + fake_host.py
-harness_sdk/Dockerfile 新协议镜像的构建文件（构建上下文是 harness_sdk/，需要 vendor/wheels/）
-dist/           提交物归档说明（tar 本身不进仓库，见 dist/README.md 的两个 sha256）
+harness/        评测镜像的入口（predict.py / router.py / net.py + 六个权重 npz）
+dist/           提交物：zhixun-harness-1.3.tar
 docs/           技术报告、答辩材料、实验记录（索引见 docs/README.md）
 legacy/         数据包到手前的原型系统（数据窗闭环，不作为提交物）
 tools/          实验脚本（十轮跑批、滚动验证、各探针、可复现每条否定结论）
@@ -143,4 +121,4 @@ python .tmp\verify_packs.py --docker      # trained 权重
 python .tmp\verify_packs.py --docker --official   # 官方权重，应得到 0.7140 / 681.1598 / 52.8686
 ```
 
-三条迭代线、滚动验证、各探针的复现命令分别写在对应 `docs/*.md` 的开头。
+十轮链、滚动验证、各探针的复现命令分别写在对应 `docs/*.md` 的开头。
