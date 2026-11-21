@@ -8,6 +8,7 @@
 |---|---|---|---|
 | `zhixun-harness-sdk10.tar` | 90.5 MB | **新**（`contest.harness.workspace.v2`，三入口 `describe/train/predict`） | **提交用这个**。B 包首轮用镜像内自写 trainer 从父检查点真续训（681.16→470.76） |
 | `zhixun-harness-sdk7.tar` | 90.5 MB | 同上 | **作废，不要提交**。B 包当年交的是手工收缩权重，被判不合规 |
+| `zhixun-harness-sdk9.tar` | 90.5 MB | 同上 | **已被 sdk10 取代**。与 sdk10 只差 B 的续训动作（B 交的是父检查点原样） |
 | `zhixun-harness-sdk6.tar` | 86.3 MB | 同上 | **退路**。平台试运行跑通过完整十轮的那一版，只作回滚用 |
 | `zhixun-harness-1.3.tar` | 86.3 MB | 旧（单入口 `predict.py`，逐行 stdin） | 兜底 / 证据。旧协议下三包全量成绩的存档 |
 | `swanlog-offline.zip` | 57.8 KB | — | SwanLab 实验记录的离线备份（在线版已公开，这里留档） |
