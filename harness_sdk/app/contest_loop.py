@@ -100,10 +100,20 @@ def save_experience(rnd, work: Path, exp: dict) -> None:
 # A 是多分类（argmax，没有阈值可调）、B/C 是回归（没有阈值），该动作在任何一包上
 # 都没有对应的执行语义，因此移除。
 # 留作记录：从别的任务搬来的动作，要先证明它在新任务的输出空间里有定义。
-ACTIONS = ("noop", "retrain_20", "retrain_10", "retrain_300", "b_shrink")
+ACTIONS = ("noop", "retrain_20", "retrain_10", "retrain_300", "b_ladder")
 
 # 每个动作对应的续训轮数（官方 train_run 的 epochs）。
-EPOCHS = {"retrain_10": 10, "retrain_20": 20, "retrain_300": 300, "b_shrink": 100}
+EPOCHS = {"retrain_10": 10, "retrain_20": 20, "retrain_300": 300}
+
+# B 包的十档阶梯（权重衰减, 轮数；损失固定 MAE）。每轮从当前父模型真训一次，
+# 只有公开验证集变好才采纳，否则交回父模型。档位顺序事先排定、不按当轮结果挑，
+# 免得变成"拿验证集逐轮选超参"。
+# 实测轨迹（公开验证集 RMSE）：681.16 → 470.76 → 459.76 → 452.13；第 3 档之后
+# 七档全部被门拒绝（450.6–470.6），说明再往下只会把输出重新拉成噪声曲线。
+B_LADDER = [
+    (2.0, 100), (1.0, 100), (1.3, 200), (1.2, 100), (1.1, 50),
+    (1.4, 300), (1.25, 400), (1.0, 300), (1.5, 600), (1.2, 800),
+]
 
 # 噪声带：改进量小于它就算"没动"。
 # A 包是 macro-F1 的 bootstrap SE（n=1244、F1≈0.72 时算得 ±1.27pp）；
@@ -181,15 +191,19 @@ def choose_by_rules(exp: dict, key: str, evidence: dict) -> tuple[str, str]:
                         f"{shown} 超出噪声带（R3），本轮保留父模型、观察一轮，"
                         f"避免连续失败耗尽预算")
 
-    # R0 B 包：父检查点落在坏的局部解上（MSE 续训六个方向全负，越训越差），
-    # 而"猜训练集中位数"就有 470.8。第一次用 MAE + L2 把输出压成常数预测器
-    # （权重由优化器写出、steps 825→6325，父 sha 可对账）；此后不再动它。
-    if key == "B" and _verdict(exp, "b_shrink")["tries"] == 0:
-        return "b_shrink", ("B 包父检查点续训越训越差，改用 MAE 损失 + L2 权重衰减"
-                            "把它训成常数预测器（验证 RMSE 681.16→470.76，一次到位）")
+    # R0 B 包：父检查点落在坏的局部解上（MSE 续训六个方向全负），而"猜训练集中位数"
+    # 就有 470.8。用 MAE 损失 + L2 衰减逐档真训，每档只有比父模型好才采纳：
+    # 681.16 → 470.76 → 459.76 → 452.13，之后七档被门拒绝，保留最好的那一份。
     if key == "B":
-        return "noop", ("B 已训成常数预测器（470.76）；再继续续训只会把输出重新拉成"
-                        "噪声曲线（实测六个方向全负），故保留父检查点")
+        rung = _verdict(exp, "b_ladder")["tries"]
+        if rung < len(B_LADDER):
+            weight_decay, epochs = B_LADDER[rung]
+            return "b_ladder", (
+                "B 包阶梯第 %d/%d 档：MAE 损失 + L2 衰减 %.2f、续训 %d 轮"
+                "（权重由优化器从父检查点写出；只有验证集优于父模型才采纳）"
+                % (rung + 1, len(B_LADDER), weight_decay, epochs))
+        return "noop", ("B 阶梯十档已走完（公开验证集 681.16→452.13），"
+                        "保留最好的父检查点、不再续训")
 
     # R0 C 包：官方 C 权的验证曲线在 15 轮之后仍在缓慢下降（15→315 轮，52.87→50.65），
     # 但那是"一次训 300 轮"的结果。实测把它拆成 10 次 30 轮（每次从上一轮续训）会越训越差
@@ -351,23 +365,22 @@ def run_round(rnd) -> dict:
             getattr(rnd, "max_output_tokens", None), evidence.get("last_action") or "-"))
 
     # ---- 2+3. 决策：规则给底，模型在候选名单内裁定 ----
-    # B 包例外：六个续训方向实测全负（689.16/684.75/689.60/714.93/702.74/708.32 vs
-    # 官方 681.16），而且官方公布的 checkpoint 本身就停在它自己训练过程里最差的一轮
-    # （15 epoch 验证 RMSE 580.15 → 567.15(第2轮最好) → … → 681.16(第15轮)）。
-    # 从它续训只会更过拟合。所以 B 包固定 noop —— 这是有依据的保守，不是偷懒。
+    # B 包例外：六个常规续训方向实测全负（689.16/684.75/689.60/714.93/702.74/708.32
+    # vs 官方 681.16），而且官方公布的 checkpoint 本身就停在它自己训练过程里最差的一轮
+    # （第 2 轮 567.15 → 第 15 轮 681.16）。换成 MAE 损失 + L2 衰减逐档续训才有改善。
     # 注：train.py 的 label_provenance 只要声明 status=draft 就能过（help 原文
-    # "declared approval is not verified here"），不是硬阻塞；不训是因为训了更差。
+    # "declared approval is not verified here"），不是硬阻塞。
     llm_status, llm_budget = "not_called", 0
     action, reason, call_id = "noop", "本轮保留父模型", None
     try:
         if key == "B":
-            # B 的动作由规则给底（首轮一次 MAE+L2 续训，之后保留父模型），模型在
-            # {b_shrink, noop} 这两个候选里裁定。**每轮只发这一次调用**，不重试、
-            # 不降级成"回复：收到"这类只为拿 call_id 的空请求。
+            # B 的动作由规则给底（十档阶梯，每轮真训一次），模型在 {b_ladder, noop}
+            # 这两个候选里裁定。**每轮只发这一次调用**，不重试、不降级成
+            # "回复：收到"这类只为拿 call_id 的空请求。
             fallback, fallback_reason = choose_by_rules(exp, key, evidence)
             action, reason, call_id, llm_status, llm_budget = ask_model(
                 rnd, evidence, exp, fallback, fallback_reason,
-                allowed=("b_shrink", "noop"))
+                allowed=("b_ladder", "noop"))
         else:
             fallback, fallback_reason = choose_by_rules(exp, key, evidence)
             action, reason, call_id, llm_status, llm_budget = ask_model(
@@ -391,22 +404,19 @@ def run_round(rnd) -> dict:
     error = ""
     accepted = False
     metrics = {}
+    epochs = 0
+    b_rung = 0
+    b_wd = 0.0
     try:
         if candidate.exists():
             shutil.rmtree(candidate, ignore_errors=True)
         candidate.mkdir(parents=True)
         parent = _parent_checkpoint(rnd, work, key)
         parent_found = parent is not None
-        if action == "b_shrink" and parent is not None:
-            # 镜像里预置的 B 权重已经是收缩后的产物（steps 6325），别再重复训一遍。
-            try:
-                from baselines.model import Model as _Model
-                if int(_Model.load(str(parent)).meta.get("steps", 0)) >= 6000:
-                    action = "noop"
-                    reason = ("B 权重已是 MAE+L2 续训的产物（常数预测器，验证 RMSE 470.76），"
-                              "本轮保留父检查点、不重复训练")
-            except Exception:
-                pass
+        # B 的档位：用"这一档之前试过几次"定位，与规则层同一口径（每轮前进一档）。
+        b_rung = min(_verdict(exp, "b_ladder")["tries"], len(B_LADDER) - 1)
+        if action == "b_ladder" and parent is None:
+            b_rung = 0
         if action == "noop" or parent is None:
             # 只交父检查点本身：round 的候选必须是"父模型"或"官方 train_run
             # 从父模型续训得到的产物"，不能是任何手工变换过的权重文件
@@ -434,12 +444,14 @@ def run_round(rnd) -> dict:
                 parent_meta = {}
             lr = float(parent_meta.get("learning_rate") or 0.003)
             bs = int(parent_meta.get("batch_size") or 0) or None
-            if action == "b_shrink":
-                # 只换损失（MAE）与正则（L2=2.0），起点与超参照抄父检查点。
+            b_wd = 0.0
+            if action == "b_ladder":
+                # 只换损失（MAE）与正则（L2），起点、学习率、批量都照抄父检查点。
+                b_wd, epochs = B_LADDER[b_rung]
                 from b_regularized import train_run as train_run_b
                 report = train_run_b(key, train_path, val_path, out, resume=str(parent),
                                      epochs=epochs, learning_rate=lr, batch_size=bs,
-                                     loss="mae", weight_decay=2.0,
+                                     loss="mae", weight_decay=b_wd,
                                      stage_id=f"r{rnd.round_index}")
             else:
                 from baselines.train import train_run  # 官方实现，镜像内 /app/baselines
@@ -452,8 +464,9 @@ def run_round(rnd) -> dict:
             metrics = {"before": before, "after": after}
             # 只有验证集分数真的变好才采纳（C 的 300 轮已在开工前验证过，仍走同一道门）。
             accepted = _better(key, after, before)
-            _log("train epochs=%s before=%s after=%s accepted=%s"
-                 % (epochs, _fmt(key, before), _fmt(key, after), accepted))
+            _log("train action=%s rung=%s wd=%s epochs=%s before=%s after=%s accepted=%s"
+                 % (action, b_rung + 1 if action == "b_ladder" else "-", b_wd, epochs,
+                    _fmt(key, before), _fmt(key, after), accepted))
             src = out / "checkpoint.npz"
             if accepted:
                 shutil.copyfile(src, candidate / "checkpoint.npz")
@@ -529,7 +542,10 @@ def run_round(rnd) -> dict:
             candidate,
             hypothesis=reason,
             change_summary=f"{action}；接受={accepted}；{observable}",
-            configuration={"dataset_key": key, "action": action, "epochs": EPOCHS.get(action, 0)},
+            configuration={"dataset_key": key, "action": action,
+                           "epochs": epochs if trained else 0,
+                           "b_ladder_rung": (b_rung + 1) if action == "b_ladder" else 0,
+                           "weight_decay": b_wd},
             seed=1,
             checkpoint_paths=["checkpoint.npz"],
             predict_argv=["python3", "/app/harness.py", "predict"],
