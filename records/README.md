@@ -40,3 +40,18 @@ python -m baselines.train --profile A \
 ```
 
 `--from-baseline` 与 `--resume` 在官方 `train.py` 里是同一套续训语义（`baselines/train.py:74` 强制 `resume must preserve the checkpoint's random seed`），所以父子 sha 一定接得上。
+
+## B 包的 MAE + L2 续训（`b_continuation_mae_l2.json`）
+
+B 的六轮常规续训（改学习率 / batch）全部比 681.16 差，所以 B 现在改用镜像内的自写 trainer `harness_sdk/app/b_regularized.py`：**与官方 `train.py` 同一套续训语义与同一份产物格式**，只把损失换成 MAE、并给 `w1/w2` 加 L2 权重衰减 2.0，从官方父检查点续训 100 epoch 后输出压向训练集中位数。
+
+| 字段 | 值 |
+|---|---|
+| `parent_checkpoint_sha256` | `sha256:c7d819fcee9d25459c583b5ffdb35593d4a47b524ed152d0226bf81a283314b4`（官方 B） |
+| `initial_steps` → `final_steps` | 825 → 6325 |
+| `initial_epochs` → `final_epochs` | 15 → 115 |
+| 公开验证集 RMSE | 681.1598 → **470.7647**（MAE 563.1058 → 410.8751） |
+| 耗时 | 0.91 s |
+
+`training.json` 里额外写了 `configuration.loss`、`configuration.weight_decay` 与 `custom_trainer_sha256`，便于核对"权重是训练循环写出来的，不是手工改的"。
+

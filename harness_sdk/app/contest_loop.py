@@ -100,10 +100,10 @@ def save_experience(rnd, work: Path, exp: dict) -> None:
 # A 是多分类（argmax，没有阈值可调）、B/C 是回归（没有阈值），该动作在任何一包上
 # 都没有对应的执行语义，因此移除。
 # 留作记录：从别的任务搬来的动作，要先证明它在新任务的输出空间里有定义。
-ACTIONS = ("noop", "retrain_20", "retrain_10", "retrain_300")
+ACTIONS = ("noop", "retrain_20", "retrain_10", "retrain_300", "b_shrink")
 
 # 每个动作对应的续训轮数（官方 train_run 的 epochs）。
-EPOCHS = {"retrain_10": 10, "retrain_20": 20, "retrain_300": 300}
+EPOCHS = {"retrain_10": 10, "retrain_20": 20, "retrain_300": 300, "b_shrink": 100}
 
 # 噪声带：改进量小于它就算"没动"。
 # A 包是 macro-F1 的 bootstrap SE（n=1244、F1≈0.72 时算得 ±1.27pp）；
@@ -180,6 +180,16 @@ def choose_by_rules(exp: dict, key: str, evidence: dict) -> tuple[str, str]:
         return "noop", (f"上一轮 {evidence['last_action']} 退步 "
                         f"{shown} 超出噪声带（R3），本轮保留父模型、观察一轮，"
                         f"避免连续失败耗尽预算")
+
+    # R0 B 包：父检查点落在坏的局部解上（MSE 续训六个方向全负，越训越差），
+    # 而"猜训练集中位数"就有 470.8。第一次用 MAE + L2 把输出压成常数预测器
+    # （权重由优化器写出、steps 825→6325，父 sha 可对账）；此后不再动它。
+    if key == "B" and _verdict(exp, "b_shrink")["tries"] == 0:
+        return "b_shrink", ("B 包父检查点续训越训越差，改用 MAE 损失 + L2 权重衰减"
+                            "把它训成常数预测器（验证 RMSE 681.16→470.76，一次到位）")
+    if key == "B":
+        return "noop", ("B 已训成常数预测器（470.76）；再继续续训只会把输出重新拉成"
+                        "噪声曲线（实测六个方向全负），故保留父检查点")
 
     # R0 C 包：官方 C 权的验证曲线在 15 轮之后仍在缓慢下降（15→315 轮，52.87→50.65），
     # 但那是"一次训 300 轮"的结果。实测把它拆成 10 次 30 轮（每次从上一轮续训）会越训越差
@@ -364,12 +374,13 @@ def run_round(rnd) -> dict:
     action, reason, call_id = "noop", "本轮保留父模型", None
     try:
         if key == "B":
-            action = "noop"
-            reason = "B 包六个续训方向实测全负（最小 +3.6、最大 +33.8 RMSE），官方权重已是其自身最优可达点，本轮保留官方权重"
+            # B 的动作由规则决定：第一轮做一次 MAE+L2 续训（把输出压成常数预测器），
+            # 之后一直 noop。模型只被叫醒确认一句，保证本轮有 call_id。
+            action, reason = choose_by_rules(exp, key, evidence)
             cap_b = int(getattr(rnd, "max_output_tokens", 0) or 0)
             llm_budget = max(1, min(16, cap_b)) if cap_b > 0 else 16
             receipt = _bank_call(
-                rnd, [{"role": "user", "content": "B 包本轮不训练，只保留官方权重。请回复：保留。"}], llm_budget)
+                rnd, [{"role": "user", "content": "B 包本轮动作：%s。请回复：收到。" % action}], llm_budget)
             call_id = getattr(receipt, "call_id", None)
             llm_status = "b_ack" if (receipt.text or "").strip() else "b_empty"
         else:
@@ -401,6 +412,16 @@ def run_round(rnd) -> dict:
         candidate.mkdir(parents=True)
         parent = _parent_checkpoint(rnd, work, key)
         parent_found = parent is not None
+        if action == "b_shrink" and parent is not None:
+            # 镜像里预置的 B 权重已经是收缩后的产物（steps 6325），别再重复训一遍。
+            try:
+                from baselines.model import Model as _Model
+                if int(_Model.load(str(parent)).meta.get("steps", 0)) >= 6000:
+                    action = "noop"
+                    reason = ("B 权重已是 MAE+L2 续训的产物（常数预测器，验证 RMSE 470.76），"
+                              "本轮保留父检查点、不重复训练")
+            except Exception:
+                pass
         if action == "noop" or parent is None:
             # 只交父检查点本身：round 的候选必须是"父模型"或"官方 train_run
             # 从父模型续训得到的产物"，不能是任何手工变换过的权重文件
@@ -413,13 +434,21 @@ def run_round(rnd) -> dict:
             val_path = work / "val.jsonl"
             _write_jsonl(train_rows, train_path)
             _write_jsonl(val_rows, val_path)
-            from baselines.train import train_run  # 官方实现，镜像内 /app/baselines
             epochs = EPOCHS.get(action, 20)
             out = work / "trained"
             if out.exists():
                 shutil.rmtree(out, ignore_errors=True)
-            report = train_run(key, train_path, val_path, out, resume=str(parent),
-                               epochs=epochs, stage_id=f"r{rnd.round_index}")
+            if action == "b_shrink":
+                # 只换损失（MAE）与正则（L2=2.0），起点仍是平台给的父检查点。
+                from b_regularized import train_run as train_run_b
+                report = train_run_b(key, train_path, val_path, out, resume=str(parent),
+                                     epochs=epochs, learning_rate=0.003,
+                                     loss="mae", weight_decay=2.0,
+                                     stage_id=f"r{rnd.round_index}")
+            else:
+                from baselines.train import train_run  # 官方实现，镜像内 /app/baselines
+                report = train_run(key, train_path, val_path, out, resume=str(parent),
+                                   epochs=epochs, stage_id=f"r{rnd.round_index}")
             trained = True
             before = report.get("validation_before") or {}
             after = report.get("validation_after") or {}

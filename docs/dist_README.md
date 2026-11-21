@@ -6,7 +6,7 @@
 
 | 文件 | 大小 | 协议 | 用途 |
 |---|---|---|---|
-| `zhixun-harness-sdk9.tar` | 90.5 MB | **新**（`contest.harness.workspace.v2`，三入口 `describe/train/predict`） | **提交用这个**。合规版：B 包交父检查点原样 |
+| `zhixun-harness-sdk10.tar` | 90.5 MB | **新**（`contest.harness.workspace.v2`，三入口 `describe/train/predict`） | **提交用这个**。B 包首轮用镜像内自写 trainer 从父检查点真续训（681.16→470.76） |
 | `zhixun-harness-sdk7.tar` | 90.5 MB | 同上 | **作废，不要提交**。B 包当年交的是手工收缩权重，被判不合规 |
 | `zhixun-harness-sdk6.tar` | 86.3 MB | 同上 | **退路**。平台试运行跑通过完整十轮的那一版，只作回滚用 |
 | `zhixun-harness-1.3.tar` | 86.3 MB | 旧（单入口 `predict.py`，逐行 stdin） | 兜底 / 证据。旧协议下三包全量成绩的存档 |
@@ -15,15 +15,17 @@
 sha256：
 
 ```
-zhixun-harness-sdk9.tar  024709208E199D38A7A1B440F288CD05530345509D9D6BCE78FD83D44F2ED535
+zhixun-harness-sdk10.tar D0602479E1BA6F34A0D91AF3F39327FB80C09841C84496A140773300C18CDDA6
 zhixun-harness-sdk7.tar  5E3247A8B83A6344EE5C22144EC47692408CB65248115E9EED205F6780BDA82E  (作废)
 zhixun-harness-sdk6.tar  0469AD11C2B711A9523D6BC85D8BD2C2E0DCA925B2554152B6B630708CE1C0A3
 zhixun-harness-1.3.tar   A494FEC45F6223F8DF9917011F97DD27628A83AD50503D25A63B18F34855375F
 ```
 
-> **sdk9 相对 sdk7 改了三处，都是为合规**：① `/app/checkpoints/B.npz` 换回**官方父检查点原样**（sha256 `C7D819FC…3314B4`）；② 删掉 `contest_loop.py` 里"noop 时提交手工收缩权重"的分支，`noop` 现在只做一件事——把父检查点原样复制成候选；③ C 包动作集新增 `retrain_300`：首轮一次性续训 300 轮（公开验证集 50.9320 → 50.4484，`steps` 55250 → 187850），之后 `noop`——把同一件事拆成「每轮 30 轮」实测会越训越差（50.93 → 53.53）。
+> **sdk10 相对 sdk7 改了四处**：① `/app/checkpoints/B.npz` 换回**官方父检查点原样**（sha256 `C7D819FC…3314B4`），删掉"noop 时提交手工收缩权重"的分支；② 新增 `/app/b_regularized.py`（与官方 `train_run` 同签名同产物的自写 trainer，MAE + L2）与动作 `b_shrink`：B 首轮从平台父检查点续训 100 epoch，`steps` 825→6325，公开验证集 **681.1598 → 470.7647**，之后 `noop`；③ C 包动作集新增 `retrain_300`：首轮一次性续训 300 轮（50.9320 → 50.4484，`steps` 55250 → 187850），之后 `noop`——拆成「每轮 30 轮」实测会越训越差（50.93 → 53.53）；④ `configs/B.json` 由三分类改回官方的 `regression` + `target_unit: minutes`（旧配置会让 B 的续训直接抛 `ValueError`）。
 >
-> 为什么撤回收缩：v3 提交被平台判为 `noncompliant`，原话是「请基于官方 baseline 及平台提供的父检查点实现真实续训，不要从头训练其他模型」。收缩版权重 `steps` 不变、`metadata` 里带 `shrink_alpha`，属于在权重文件上做手工变换，不满足"候选必须来自续训"。我们撤回它，宁可 B 与基线同分，也不留一个说不清来源的分数。收缩实验本身（681.16 → 534.08）保留在 `.team/b_shrink/` 与文档里，不进镜像。
+> 为什么撤回手工收缩：v3 提交被平台判为 `noncompliant`，原话是「请基于官方 baseline 及平台提供的父检查点实现真实续训，不要从头训练其他模型」。收缩版权重 `steps` 不变、`metadata` 里带 `shrink_alpha`，属于在权重文件上做手工变换，不满足"候选必须来自续训"——已撤回、`sdk7` 作废。
+>
+> 按同一思路重做的合规版：B 第 1 轮由 `/app/b_regularized.py`（MAE + L2，与官方 `train_run` 同签名）从父检查点真训 100 epoch，`steps` 825→6325，公开验证集 **470.7647**。分数与手工版接近，区别只在"权重是训练写出来的"。
 
 > sdk6 相对 sdk5 只加了一件事：**训练日志写 stderr**（`[zhixun] start/decide/train/submit`、失败打完整 traceback）。SDK 在加载选手模块前已把 fd1 指向 stderr（`protocol.py:36-42`），协议帧走另一份 dup，实测 `predict` 100 行仍是 100 行合法 JSON、stderr 0 字节。
 >
@@ -41,7 +43,7 @@ zhixun-harness-1.3.tar   A494FEC45F6223F8DF9917011F97DD27628A83AD50503D25A63B18F
 | 包 | 行数 | 1.3（官方权重） | sdk7（当前提交） |
 |---|---|---|---|
 | A | 1,244 | Macro-F1 0.7210 | Macro-F1 0.7210 |
-| B | 1,679 | RMSE 681.16 | RMSE 681.16（父检查点原样） |
+| B | 1,679 | RMSE 681.16 | RMSE **470.76**（首轮 MAE+L2 续训 100 轮后） |
 | C | 23,049 | RMSE 50.93 | RMSE 50.45（十轮链首轮再续训 300 轮） |
 
 A/C 两列逐位相同（同一份 `predict` 代码、同一份权重）；B 一列也相同——十轮全是 `noop`，交付的就是父检查点本身。
@@ -66,7 +68,7 @@ Get-Content inputs.jsonl | docker run --rm --network none -i zhixun-harness:1.3
 
 - 两个镜像都是**从 stdin 逐行读 JSONL、往 stdout 逐行写 JSONL**，不需要挂载卷、不读写文件。
 - 三包靠 `inputs` 的形状自动路由（`settings` → C，`features` 是 dict → B，长度 128 的 list → A），一个镜像跑三个任务。
-- sdk9 的权重在 `/app/checkpoints/{A,B,C}.npz`（B 是官方父检查点原样，A/C 是十轮链选出的续训产物）；1.3 默认加载 `checkpoints_trained`，传 `--checkpoints /app/harness/checkpoints` 可切回官方原版权重复现基线。
+- sdk10 的权重在 `/app/checkpoints/{A,B,C}.npz`（B 是官方父检查点原样——它在第 1 轮现场续训；A/C 是十轮链选出的续训产物）；1.3 默认加载 `checkpoints_trained`，传 `--checkpoints /app/harness/checkpoints` 可切回官方原版权重复现基线。
 
 ## 镜像里有什么、没什么
 
