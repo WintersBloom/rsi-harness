@@ -222,6 +222,22 @@ def _noise_text(key: str) -> str:
     return f"{NOISE_ABS[key] * 100:.2f}pp" if key in NOISE_ABS else f"{NOISE_REL.get(key, 0.01) * 100:.0f}%"
 
 
+GATEWAY_ATTEMPTS = 3
+_GATEWAY_HINTS = ("502", "503", "504", "bad gateway", "gateway", "timeout", "timed out",
+                  "rpc_outcome_unknown", "connection reset", "connection aborted",
+                  "remote end closed", "connection broken")
+# 这些是"重发也没用"的错误：鉴权、参数、额度。遇到就立刻兜底，不做无意义重试。
+_FATAL_HINTS = ("401", "403", "400", "unauthorized", "forbidden", "max_tokens", "invalid_request")
+
+
+def _gateway_blip(exc) -> bool:
+    """True 表示"传输层/网关的错误，同一份请求重发有意义"。"""
+    message = f"{type(exc).__name__}: {exc}".lower()
+    if any(bad in message for bad in _FATAL_HINTS):
+        return False
+    return any(hint in message for hint in _GATEWAY_HINTS)
+
+
 def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: str,
               allowed: tuple = ACTIONS) -> tuple[str, str, str | None, str, int]:
     """让 LLM 在合法动作里选一个。返回 (动作, 理由, call_id, llm_status, budget)。
@@ -229,8 +245,10 @@ def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: st
     三条硬约束：
       - 只给监测证据与历史战绩，不给标签、不给真值；
       - 动作必须在候选名单里，否则退回规则给的动作并记 llm_fallback；
-      - 每轮**只发这一次调用**：不重试、不降级成更短的请求。失败（超时/空回复）
-        就退回规则动作并在 reason 里写明，绝不为拿 call_id 补发一次"凑数"请求。
+      - 每轮**只发一次有意义的调用**，请求内容从不缩短、从不降级成 `ok`/1 token；
+      - **唯一的例外是网关抖动**：平台报 502/504/timeout 这类"用量未确认"的传输错误时，
+        把**同一份完整请求**重发，最多 3 次（间隔 2s、5s），因为原请求已被平台作废、
+        重发不构成第二次决策调用。空回复仍然不重试。
     """
     ranked = [a for a in (fallback,) + allowed if _verdict(exp, a)["status"] != "dead"]
     ranked = list(dict.fromkeys(ranked))[:3] or ["noop"]
@@ -263,20 +281,28 @@ def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: st
     last_text = ""
     call_id = None
     llm_status = "empty"
-    for attempt in range(tries):
+    attempt = 0
+    while True:
+        attempt += 1
         try:
             receipt = rnd.model(
                 [{"role": "user", "content": prompt + "\n/no_think"}],
                 max_tokens=budget,
             )
-        except Exception as exc:  # 超时、网络，一律兜底
+        except Exception as exc:  # 超时、网络、网关
+            if attempt < GATEWAY_ATTEMPTS and _gateway_blip(exc):
+                wait = 2 if attempt == 1 else 5
+                _log("model gateway blip (%s: %s); retry %d/%d in %ss"
+                     % (type(exc).__name__, str(exc)[:120], attempt, GATEWAY_ATTEMPTS, wait))
+                time.sleep(wait)
+                continue
             return (fallback, f"{fallback_reason}（模型不可用：{type(exc).__name__}，已用规则兜底）",
                     None, "error", budget)
         call_id = getattr(receipt, "call_id", None)
         last_text = (receipt.text or "").strip()
         if last_text:
             llm_status = "answered"
-            break
+        break
 
     start, end = last_text.find("{"), last_text.rfind("}")
     if start >= 0 and end > start:

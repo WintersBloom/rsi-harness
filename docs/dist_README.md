@@ -6,7 +6,8 @@
 
 | 文件 | 大小 | 协议 | 用途 |
 |---|---|---|---|
-| `zhixun-harness-sdk12.tar` | 90.5 MB | **新**（`contest.harness.workspace.v2`，三入口 `describe/train/predict`） | **提交用这个**。B 十轮逐轮真训（681.16→452.13，采纳 3 档）；每轮只发一次模型调用；不交占位文件 |
+| `zhixun-harness-sdk13.tar` | 90.5 MB | **新**（`contest.harness.workspace.v2`，三入口 `describe/train/predict`） | **提交用这个**。与 sdk12 只差一处：模型网关 502/超时重发同一份请求（最多 3 次） |
+| `zhixun-harness-sdk12.tar` | 90.5 MB | 同上 | 已被 `sdk13` 取代（只差网关抖动重试）；每轮只发一次模型调用；不交占位文件 |
 | `zhixun-harness-sdk10.tar` | 90.5 MB | 同上 | 已被 `sdk11` 取代（只差预检四项的兜底整改） |
 | `zhixun-harness-sdk11.tar` | 90.5 MB | 同上 | 已被 `sdk12` 取代（B 由一次性收缩改成十档阶梯） |
 | `zhixun-harness-sdk7.tar` | 90.5 MB | 同上 | **作废，不要提交**。B 包当年交的是手工收缩权重，被判不合规 |
@@ -18,13 +19,13 @@
 sha256：
 
 ```
-zhixun-harness-sdk12.tar 0FF9DBDCFC8D12A4AAC8E6007D5AE89E29937B20CF9E4E59D13CDD401D846CE7
+zhixun-harness-sdk13.tar D1C773DF141D71451266F523F553B648B9246631AC4A0DEA18B8CBA5EFA753FD
 zhixun-harness-sdk7.tar  5E3247A8B83A6344EE5C22144EC47692408CB65248115E9EED205F6780BDA82E  (作废)
 zhixun-harness-sdk6.tar  0469AD11C2B711A9523D6BC85D8BD2C2E0DCA925B2554152B6B630708CE1C0A3
 zhixun-harness-1.3.tar   A494FEC45F6223F8DF9917011F97DD27628A83AD50503D25A63B18F34855375F
 ```
 
-> **sdk12 相对 sdk7 改了六处**：① `/app/checkpoints/B.npz` 换回**官方父检查点原样**（sha256 `C7D819FC…3314B4`），删掉"noop 时提交手工收缩权重"的分支；② 新增 `/app/b_regularized.py`（与官方 `train_run` 同签名同产物的自写 trainer，MAE + L2）；⑤ B 的动作从一次性 `b_shrink` 改成**十档阶梯 `b_ladder`**：每轮从父检查点真训一档、只有验证集变好才采纳，公开验证集 681.1598 → 470.76 → 459.76 → **452.13**（采纳 3 档、回退 7 档）；③ C 包动作集新增 `retrain_300`：首轮一次性续训 300 轮（50.9320 → 50.4484，`steps` 55250 → 187850），之后 `noop`——拆成「每轮 30 轮」实测会越训越差（50.93 → 53.53）；④ `configs/B.json` 由三分类改回官方的 `regression` + `target_unit: minutes`（旧配置会让 B 的续训直接抛 `ValueError`）。
+> **sdk13 相对 sdk7 改了七处**：① `/app/checkpoints/B.npz` 换回**官方父检查点原样**（sha256 `C7D819FC…3314B4`），删掉"noop 时提交手工收缩权重"的分支；② 新增 `/app/b_regularized.py`（与官方 `train_run` 同签名同产物的自写 trainer，MAE + L2）；⑤ B 的动作从一次性 `b_shrink` 改成**十档阶梯 `b_ladder`**：每轮从父检查点真训一档、只有验证集变好才采纳，公开验证集 681.1598 → 470.76 → 459.76 → **452.13**（采纳 3 档、回退 7 档）；③ C 包动作集新增 `retrain_300`：首轮一次性续训 300 轮（50.9320 → 50.4484，`steps` 55250 → 187850），之后 `noop`——拆成「每轮 30 轮」实测会越训越差（50.93 → 53.53）；④ `configs/B.json` 由三分类改回官方的 `regression` + `target_unit: minutes`（旧配置会让 B 的续训直接抛 `ValueError`）。⑤ B 的动作从一次性 `b_shrink` 改成**十档阶梯 `b_ladder`**（每轮真训一档、只有验证集变好才采纳，681.16→452.13）。⑥ C 新增 `retrain_300`（首轮一次性 300 轮，50.93→50.45）。⑦ `sdk13` 起对模型网关的 502/503/504/超时**重发同一份完整请求**（最多 3 次），401/403/400 与空回复不重试。
 >
 > 为什么撤回手工收缩：v3 提交被平台判为 `noncompliant`，原话是「请基于官方 baseline 及平台提供的父检查点实现真实续训，不要从头训练其他模型」。收缩版权重 `steps` 不变、`metadata` 里带 `shrink_alpha`，属于在权重文件上做手工变换，不满足"候选必须来自续训"——已撤回、`sdk7` 作废。
 >
