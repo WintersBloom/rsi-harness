@@ -10,7 +10,7 @@
 
 | 项 | 状态 | 说明 |
 |---|---|---|
-| ① 评测镜像 | **完成** | `zhixun-harness:sdk8`（90.5 MB）。提交物是 `dist/zhixun-harness-sdk8.tar`，sha256 `7B91A85F826D6903F33E8D145AA858E6F83D5938A9C5E88185EB38A3C6994D9C`。**这个 tar 已锁定**：`docker save` 每次带新时间戳、哈希必变，不要覆盖它；代码若再改，重打并同步更新这一行 |
+| ① 评测镜像 | **完成** | `zhixun-harness:sdk9`（90.5 MB）。提交物是 `dist/zhixun-harness-sdk9.tar`，sha256 `024709208E199D38A7A1B440F288CD05530345509D9D6BCE78FD83D44F2ED535`。**这个 tar 已锁定**：`docker save` 每次带新时间戳、哈希必变，不要覆盖它；代码若再改，重打并同步更新这一行 |
 | ② SwanLab 记录 | **已设公开** | 12 个 run：[zhipin-engine](https://swanlab.cn/@WintersBloom/zhipin-engine)（9 个原型横评 + 3 个真实数据十轮链，每 run 237 条记录含逐点曲线）。自动化探测判定不了可见性，**提交前请用无痕窗口打开一次确认** |
 | ③ 运行说明 | **完成** | 本文 + `docs/作品文档.md`（技术报告）+ `docs/提交说明.md`（评审入口）+ `docs/README.md`（51 份文档的索引） |
 
@@ -20,9 +20,9 @@
 |---|---|---|---|
 | A 六类气体（Macro-F1 ↑） | 0.7140 | **0.7210** | +0.70pp（+0.98%），**在噪声带内**（bootstrap SE ±1.3pp，差值 0.55 个标准误，统计上不显著） |
 | B 轴承 RUL（RMSE ↓） | 681.16 | **681.16** | 0。六个续训方向全使 RMSE 变大，一次没采纳，交付父检查点原样（详见 `docs/作品文档.md` 第三节） |
-| C 发动机 RUL（RMSE ↓） | 52.87 | **50.93** | −3.66% |
+| C 发动机 RUL（RMSE ↓） | 52.87 | **50.45** | −4.58%（首轮一次续训 300 轮） |
 
-分数由容器实测复现，不是本地算的：`docker run --network none -i zhixun-harness:sdk8 predict < inputs.jsonl`（旧协议镜像 `zhixun-harness:1.3` 同样可用，A/C 结果逐位相同）。
+分数由容器实测复现，不是本地算的：`docker run --network none -i zhixun-harness:sdk9 predict < inputs.jsonl`（旧协议镜像 `zhixun-harness:1.3` 同样可用，A/C 结果逐位相同）。
 
 ## 三、三十秒跑通
 

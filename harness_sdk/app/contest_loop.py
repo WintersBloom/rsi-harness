@@ -100,7 +100,10 @@ def save_experience(rnd, work: Path, exp: dict) -> None:
 # A 是多分类（argmax，没有阈值可调）、B/C 是回归（没有阈值），该动作在任何一包上
 # 都没有对应的执行语义，因此移除。
 # 留作记录：从别的任务搬来的动作，要先证明它在新任务的输出空间里有定义。
-ACTIONS = ("noop", "retrain_20", "retrain_10")
+ACTIONS = ("noop", "retrain_20", "retrain_10", "retrain_300")
+
+# 每个动作对应的续训轮数（官方 train_run 的 epochs）。
+EPOCHS = {"retrain_10": 10, "retrain_20": 20, "retrain_300": 300}
 
 # 噪声带：改进量小于它就算"没动"。
 # A 包是 macro-F1 的 bootstrap SE（n=1244、F1≈0.72 时算得 ±1.27pp）；
@@ -177,6 +180,16 @@ def choose_by_rules(exp: dict, key: str, evidence: dict) -> tuple[str, str]:
         return "noop", (f"上一轮 {evidence['last_action']} 退步 "
                         f"{shown} 超出噪声带（R3），本轮保留父模型、观察一轮，"
                         f"避免连续失败耗尽预算")
+
+    # R0 C 包：官方 C 权的验证曲线在 15 轮之后仍在缓慢下降（15→315 轮，52.87→50.65），
+    # 但那是"一次训 300 轮"的结果。实测把它拆成 10 次 30 轮（每次从上一轮续训）会越训越差
+    # （公开验证集 50.93 → 53.53），所以 C 只在第一轮一次性走完 300 轮，之后保留父检查点。
+    if key == "C" and _verdict(exp, "retrain_300")["tries"] == 0:
+        return "retrain_300", ("C 包官方权重的验证曲线在 15 轮后仍缓慢下降，"
+                              "按公开验证集验证过的配置一次性续训 300 轮")
+    if key == "C":
+        return "noop", ("C 已一次性训到 300 轮；把它拆成每轮续训会让公开验证集分数"
+                        "反而变差（50.93→53.53），故之后保留父检查点")
 
     return "retrain_20", "无历史否决信号，按默认节奏续训 20 轮"
 
@@ -401,7 +414,7 @@ def run_round(rnd) -> dict:
             _write_jsonl(train_rows, train_path)
             _write_jsonl(val_rows, val_path)
             from baselines.train import train_run  # 官方实现，镜像内 /app/baselines
-            epochs = 10 if action == "retrain_10" else 20
+            epochs = EPOCHS.get(action, 20)
             out = work / "trained"
             if out.exists():
                 shutil.rmtree(out, ignore_errors=True)
@@ -411,6 +424,7 @@ def run_round(rnd) -> dict:
             before = report.get("validation_before") or {}
             after = report.get("validation_after") or {}
             metrics = {"before": before, "after": after}
+            # 只有验证集分数真的变好才采纳（C 的 300 轮已在开工前验证过，仍走同一道门）。
             accepted = _better(key, after, before)
             _log("train epochs=%s before=%s after=%s accepted=%s"
                  % (epochs, _fmt(key, before), _fmt(key, after), accepted))
@@ -489,7 +503,7 @@ def run_round(rnd) -> dict:
                 candidate,
                 hypothesis=reason,
                 change_summary=f"{action}；接受={accepted}；{observable}",
-                configuration={"dataset_key": key, "action": action, "epochs": 10 if action == "retrain_10" else (20 if action == "retrain_20" else 0)},
+                configuration={"dataset_key": key, "action": action, "epochs": EPOCHS.get(action, 0)},
                 seed=1,
                 checkpoint_paths=["checkpoint.npz"],
                 predict_argv=["python3", "/app/harness.py", "predict"],
