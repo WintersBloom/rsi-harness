@@ -291,31 +291,6 @@ def _parent_checkpoint(rnd, work: Path, key: str) -> Path | None:
     return None
 
 
-def _shrink_checkpoint(key: str):
-    """B 包的收缩权重：带 shrink_alpha 标记的那一份。
-
-    为什么不复用 `_parent_checkpoint`：那条回退链优先拿平台给的 `/previous`，
-    而 `/previous` 是**官方原始权重**；我们要提交的是在官方权重上做过输出层
-    收缩的版本（w2/b2 乘 α、target_mean 混入常数）。两者是不同的文件，
-    混在一条链里会导致"以为交了收缩版、其实交了官版"——这种错在评测时
-    完全看不出来（分数只是没变），所以必须按 metadata 里的标记识别。
-    """
-    here = Path(__file__).resolve().parent
-    for base in (Path("/app/checkpoints"), here / "checkpoints",
-                 here.parent / "harness" / "checkpoints_shrink"):
-        p = base / ("%s.npz" % key)
-        if not p.is_file():
-            continue
-        try:
-            import numpy as _np
-            meta = json.loads(str(_np.load(p, allow_pickle=True)["metadata"].item()))
-        except Exception:
-            continue
-        if meta.get("shrink_alpha") is not None:
-            return p, float(meta["shrink_alpha"]), float(meta.get("shrink_constant") or 0.0)
-    return None, None, None
-
-
 def _bank_call(rnd, messages, budget):
     """发一次模型调用；失败就逐级降级重试，唯一目标是**拿到 call_id**。
 
@@ -414,24 +389,12 @@ def run_round(rnd) -> dict:
         parent = _parent_checkpoint(rnd, work, key)
         parent_found = parent is not None
         if action == "noop" or parent is None:
+            # 只交父检查点本身：round 的候选必须是"父模型"或"官方 train_run
+            # 从父模型续训得到的产物"，不能是任何手工变换过的权重文件
+            # （平台按续训要求审核，手工改造的 checkpoint 会被判非合规）。
             if parent is not None:
                 shutil.copyfile(parent, candidate / "checkpoint.npz")
-            # B 包特例：noop 的语义是"不训练"，但可以提交一个**在父权重上做过
-            # 确定性变换**的候选。做法是输出层收缩 pred' = α·pred + (1−α)·C，
-            # 等价于 w2←αw2、b2←αb2、target_mean←α·target_mean+(1−α)·C
-            # （常数必须混进 target_mean，不能加到 b2——b2 在无量纲的 z 空间，
-            #   加 758 会被 target_scale 放大 785 倍，实测 RMSE 直接到 29 万）。
-            # 这不是训练：steps 不变，metadata 里写了 shrink_alpha，可被核对。
-            if key == "B":
-                shrink_path, shrink_alpha, shrink_c = _shrink_checkpoint(key)
-                if shrink_path is not None:
-                    shutil.copyfile(shrink_path, candidate / "checkpoint.npz")
-                    reason = reason + ("（提交输出层收缩版：w2←%.2f·w2、b2←%.2f·b2、"
-                                       "target_mean←%.2f·target_mean+%.1f；非训练，steps 不变）"
-                                       % (shrink_alpha, shrink_alpha, shrink_alpha,
-                                          (1 - shrink_alpha) * shrink_c))
-                else:
-                    reason = reason + "（未找到收缩权重，提交官方权重）"
+                reason = reason + "（不训练，提交父检查点原样）"
         else:
             train_path = work / "train.jsonl"
             val_path = work / "val.jsonl"

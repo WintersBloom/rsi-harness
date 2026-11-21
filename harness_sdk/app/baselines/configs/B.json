@@ -1,7 +1,8 @@
 {
   "profile": "B",
-  "task": "classification",
-  "classes": ["Normal", "Degrading", "SevereFault"],
+  "task": "regression",
+  "target_unit": "minutes",
+  "classes": [],
   "hidden": 24,
   "seed": 42,
   "learning_rate": 0.003,
