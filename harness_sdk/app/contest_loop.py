@@ -208,15 +208,17 @@ def _noise_text(key: str) -> str:
     return f"{NOISE_ABS[key] * 100:.2f}pp" if key in NOISE_ABS else f"{NOISE_REL.get(key, 0.01) * 100:.0f}%"
 
 
-def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: str) -> tuple[str, str, str | None, str, int]:
+def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: str,
+              allowed: tuple = ACTIONS) -> tuple[str, str, str | None, str, int]:
     """让 LLM 在合法动作里选一个。返回 (动作, 理由, call_id, llm_status, budget)。
 
     三条硬约束：
       - 只给监测证据与历史战绩，不给标签、不给真值；
       - 动作必须在候选名单里，否则退回规则给的动作并记 llm_fallback；
-      - 任何异常都吞掉，用 fallback 顶上 —— LLM 可以缺席，流程不能死。
+      - 每轮**只发这一次调用**：不重试、不降级成更短的请求。失败（超时/空回复）
+        就退回规则动作并在 reason 里写明，绝不为拿 call_id 补发一次"凑数"请求。
     """
-    ranked = [a for a in (fallback,) + ACTIONS if _verdict(exp, a)["status"] != "dead"]
+    ranked = [a for a in (fallback,) + allowed if _verdict(exp, a)["status"] != "dead"]
     ranked = list(dict.fromkeys(ranked))[:3] or ["noop"]
     payload = {
         "dataset": evidence.get("dataset_key"),
@@ -237,12 +239,13 @@ def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: st
     )
     # Qwen3 系列是"先思考再回答"的模型：官方端点不支持 chat_template_kwargs 关思考，
     # 思考会吃掉整个 max_tokens 预算，content 直接为空（实测 200/400 token 时 100% 为空）。
-    # 对策：① 预算尽量给到 900；② 末尾加 /no_think；③ 空回复重试一次。
+    # 对策：① 预算尽量给到 900；② 末尾加 /no_think；③ **不重试**——空回复就退回
+    # 规则动作，本轮照常继续（每轮只允许一次有意义的调用，重发属于凑数）。
     # 但 SDK 的 round.py:179 规定 max_tokens 不得超过 rnd.max_output_tokens（否则 MAX_TOKENS_INVALID），
     # 平台实测值可能只有 128（见 SDK tests），所以这里绝不虚抬下限。
     cap = int(getattr(rnd, "max_output_tokens", 0) or 0)
     budget = max(1, min(900, cap)) if cap > 0 else 900
-    tries = 2
+    tries = 1
     last_text = ""
     call_id = None
     llm_status = "empty"
@@ -314,22 +317,6 @@ def _parent_checkpoint(rnd, work: Path, key: str) -> Path | None:
     return None
 
 
-def _bank_call(rnd, messages, budget):
-    """发一次模型调用；失败就逐级降级重试，唯一目标是**拿到 call_id**。
-
-    SDK 的 finish() 在 call_ids 为空时直接抛 MODEL_CALL_REQUIRED（round.py:336），
-    整轮作废。所以这里的策略是"宁可只发一个字的请求，也要拿到一次成功回执"。
-    """
-    attempts = [(messages, budget), (messages, 1), ([{"role": "user", "content": "ok"}], 1)]
-    last = None
-    for msgs, limit in attempts:
-        try:
-            return rnd.model(msgs, max_tokens=max(1, int(limit)))
-        except Exception as exc:  # 记住最后一个错，继续降级
-            last = exc
-    raise last if last is not None else RuntimeError("model call failed")
-
-
 def run_round(rnd) -> dict:
     """一轮训练。任何分支都必须走 finish，绝不向上抛。
 
@@ -374,15 +361,13 @@ def run_round(rnd) -> dict:
     action, reason, call_id = "noop", "本轮保留父模型", None
     try:
         if key == "B":
-            # B 的动作由规则决定：第一轮做一次 MAE+L2 续训（把输出压成常数预测器），
-            # 之后一直 noop。模型只被叫醒确认一句，保证本轮有 call_id。
-            action, reason = choose_by_rules(exp, key, evidence)
-            cap_b = int(getattr(rnd, "max_output_tokens", 0) or 0)
-            llm_budget = max(1, min(16, cap_b)) if cap_b > 0 else 16
-            receipt = _bank_call(
-                rnd, [{"role": "user", "content": "B 包本轮动作：%s。请回复：收到。" % action}], llm_budget)
-            call_id = getattr(receipt, "call_id", None)
-            llm_status = "b_ack" if (receipt.text or "").strip() else "b_empty"
+            # B 的动作由规则给底（首轮一次 MAE+L2 续训，之后保留父模型），模型在
+            # {b_shrink, noop} 这两个候选里裁定。**每轮只发这一次调用**，不重试、
+            # 不降级成"回复：收到"这类只为拿 call_id 的空请求。
+            fallback, fallback_reason = choose_by_rules(exp, key, evidence)
+            action, reason, call_id, llm_status, llm_budget = ask_model(
+                rnd, evidence, exp, fallback, fallback_reason,
+                allowed=("b_shrink", "noop"))
         else:
             fallback, fallback_reason = choose_by_rules(exp, key, evidence)
             action, reason, call_id, llm_status, llm_budget = ask_model(
@@ -438,17 +423,29 @@ def run_round(rnd) -> dict:
             out = work / "trained"
             if out.exists():
                 shutil.rmtree(out, ignore_errors=True)
+            # 续训必须沿父检查点自己的超参（学习率/批量/种子），否则"续训"其实是
+            # 换了优化器设定再跑，复现不出我们离线链上的数字（A 父权重 lr=0.0015、
+            # C 父权重 lr=0.006，都和 profiles 里的默认值不同）。
+            parent_meta = {}
+            try:
+                from baselines.model import Model as _Model0
+                parent_meta = dict(_Model0.load(str(parent)).meta)
+            except Exception:
+                parent_meta = {}
+            lr = float(parent_meta.get("learning_rate") or 0.003)
+            bs = int(parent_meta.get("batch_size") or 0) or None
             if action == "b_shrink":
-                # 只换损失（MAE）与正则（L2=2.0），起点仍是平台给的父检查点。
+                # 只换损失（MAE）与正则（L2=2.0），起点与超参照抄父检查点。
                 from b_regularized import train_run as train_run_b
                 report = train_run_b(key, train_path, val_path, out, resume=str(parent),
-                                     epochs=epochs, learning_rate=0.003,
+                                     epochs=epochs, learning_rate=lr, batch_size=bs,
                                      loss="mae", weight_decay=2.0,
                                      stage_id=f"r{rnd.round_index}")
             else:
                 from baselines.train import train_run  # 官方实现，镜像内 /app/baselines
                 report = train_run(key, train_path, val_path, out, resume=str(parent),
-                                   epochs=epochs, stage_id=f"r{rnd.round_index}")
+                                   epochs=epochs, learning_rate=lr, batch_size=bs,
+                                   stage_id=f"r{rnd.round_index}")
             trained = True
             before = report.get("validation_before") or {}
             after = report.get("validation_after") or {}
@@ -476,9 +473,10 @@ def run_round(rnd) -> dict:
         accepted = False
 
     if not (candidate / "checkpoint.npz").is_file():
-        # 最后一道：连父模型都没有，就写一个空占位，保证 finish 有东西可指
-        np.savez(candidate / "checkpoint.npz", placeholder=np.zeros(1))
-        reason = reason + "（无可用权重，提交占位）"
+        # 连父模型都找不到时**不能**交占位文件：空 npz 会让下一轮 predict 直接崩，
+        # 而这一轮还会被记成"完成"。宁可让本轮显式失败，让平台把原因记下来。
+        raise RuntimeError(
+            "no candidate checkpoint: parent unavailable (key=%s, action=%s)" % (key, action))
 
     # ---- 5. 账本：更新经验表（这是"策略随经验改变"的唯一载体）----
     delta = _delta(key, metrics.get("before") or {}, metrics.get("after") or {}) if metrics else None
@@ -526,27 +524,19 @@ def run_round(rnd) -> dict:
         observable += "；fatal=" + (" | ".join(fatal))[:240]
 
     submitted = None
-    for attempt in range(2):
-        try:
-            submitted = rnd.submit_candidate(
-                candidate,
-                hypothesis=reason,
-                change_summary=f"{action}；接受={accepted}；{observable}",
-                configuration={"dataset_key": key, "action": action, "epochs": EPOCHS.get(action, 0)},
-                seed=1,
-                checkpoint_paths=["checkpoint.npz"],
-                predict_argv=["python3", "/app/harness.py", "predict"],
-            )
-            break
-        except Exception as exc:
-            fatal.append("submit %s: %s" % (type(exc).__name__, exc))
-            if attempt == 0:
-                try:
-                    np.savez(candidate / "checkpoint.npz", placeholder=np.zeros(1))
-                except Exception:
-                    pass
-                continue
-            break
+    try:
+        submitted = rnd.submit_candidate(
+            candidate,
+            hypothesis=reason,
+            change_summary=f"{action}；接受={accepted}；{observable}",
+            configuration={"dataset_key": key, "action": action, "epochs": EPOCHS.get(action, 0)},
+            seed=1,
+            checkpoint_paths=["checkpoint.npz"],
+            predict_argv=["python3", "/app/harness.py", "predict"],
+        )
+    except Exception as exc:
+        # 只提交一次；失败就如实上报，不换占位文件重试。
+        fatal.append("submit %s: %s" % (type(exc).__name__, exc))
 
     save_experience(rnd, work, exp)
 
