@@ -1,0 +1,16 @@
+# New-protocol image (contest_harness workspace.v2).
+# Build from harness_sdk/ so that vendor/wheels must sit beside app/.
+#   docker build -t zhixun-harness:sdk -f Dockerfile .
+FROM python:3.11-slim
+
+COPY vendor/wheels/ /wheels/
+RUN pip install --no-cache-dir --no-index --find-links=/wheels numpy==1.26.4 \
+    && rm -rf /wheels
+
+COPY app/ /app/
+
+WORKDIR /app
+
+# The platform calls exactly these three verbs.
+ENTRYPOINT ["python", "/app/harness.py"]
+CMD ["describe"]
