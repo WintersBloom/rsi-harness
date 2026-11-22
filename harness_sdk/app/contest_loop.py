@@ -100,10 +100,10 @@ def save_experience(rnd, work: Path, exp: dict) -> None:
 # A 是多分类（argmax，没有阈值可调）、B/C 是回归（没有阈值），该动作在任何一包上
 # 都没有对应的执行语义，因此移除。
 # 留作记录：从别的任务搬来的动作，要先证明它在新任务的输出空间里有定义。
-ACTIONS = ("noop", "retrain_20", "retrain_10", "retrain_300", "b_ladder")
+ACTIONS = ("noop", "retrain_20", "retrain_10", "retrain_300", "b_ladder", "c_long")
 
 # 每个动作对应的续训轮数（官方 train_run 的 epochs）。
-EPOCHS = {"retrain_10": 10, "retrain_20": 20, "retrain_300": 300}
+EPOCHS = {"retrain_10": 10, "retrain_20": 20, "retrain_300": 300, "c_long": 900}
 
 # B 包的十档阶梯（权重衰减, 轮数；损失固定 MAE）。每轮从当前父模型真训一次，
 # 只有公开验证集变好才采纳，否则交回父模型。档位顺序事先排定、不按当轮结果挑，
@@ -208,13 +208,11 @@ def choose_by_rules(exp: dict, key: str, evidence: dict) -> tuple[str, str]:
     # R0 C 包：官方 C 权的验证曲线在 15 轮之后仍在缓慢下降（15→315 轮，52.87→50.65），
     # 但那是"一次训 300 轮"的结果。实测把它拆成 10 次 30 轮（每次从上一轮续训）会越训越差
     # （公开验证集 50.93 → 53.53），所以 C 只在第一轮一次性走完 300 轮，之后保留父检查点。
-    if key == "C" and _verdict(exp, "retrain_300")["tries"] == 0:
-        return "retrain_300", ("C 包官方权重的验证曲线在 15 轮后仍缓慢下降，"
-                              "按公开验证集验证过的配置一次性续训 300 轮")
     if key == "C":
-        return "noop", ("C 已一次性训到 300 轮；把它拆成每轮续训会让公开验证集分数"
-                        "反而变差（50.93→53.53），故之后保留父检查点")
-
+        if _verdict(exp, "c_long")["tries"] == 0:
+            return "c_long", ("C 只跑一次长程续训：lr 0.002、900 轮、结束时回滚到验证最好那一轮"
+                              "（实测公开验证集 50.93→50.07），并带常数塌陷护栏")
+        return "noop", "C 的长程续训已跑完，本轮保留当前最优检查点"
     return "retrain_20", "无历史否决信号，按默认节奏续训 20 轮"
 
 
@@ -479,6 +477,11 @@ def run_round(rnd) -> dict:
                                      epochs=epochs, learning_rate=lr, batch_size=bs,
                                      loss="mae", weight_decay=b_wd,
                                      stage_id=f"r{rnd.round_index}")
+            elif action == "c_long":
+                from c_long import train_run as train_run_c
+                report = train_run_c(key, train_path, val_path, out, resume=str(parent),
+                                     epochs=epochs, learning_rate=0.002, batch_size=bs,
+                                     stage_id=f"r{rnd.round_index}")
             else:
                 from baselines.train import train_run  # 官方实现，镜像内 /app/baselines
                 report = train_run(key, train_path, val_path, out, resume=str(parent),
@@ -490,6 +493,15 @@ def run_round(rnd) -> dict:
             metrics = {"before": before, "after": after}
             # 只有验证集分数真的变好才采纳（C 的 300 轮已在开工前验证过，仍走同一道门）。
             accepted = _better(key, after, before)
+            guard = report.get("guard") or {}
+            if action == "c_long" and guard.get("collapsed"):
+                accepted = False
+                _log("guard: C 训练塌成常数（pred_std=%.3f < %.1f），本轮不提交"
+                     % (float(guard.get("pred_std", 0)), float(guard.get("min_pred_std", 1))))
+            if action == "c_long":
+                _log("c_long kept_best_epoch=%s final_epoch=%s pred_std=%.3f"
+                     % (report.get("kept_best_epoch"), report.get("final_epochs"),
+                        float((report.get("guard") or {}).get("pred_std", 0))))
             _log("train action=%s rung=%s wd=%s epochs=%s before=%s after=%s accepted=%s"
                  % (action, b_rung + 1 if action == "b_ladder" else "-", b_wd, epochs,
                     _fmt(key, before), _fmt(key, after), accepted))
