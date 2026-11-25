@@ -55,3 +55,6 @@ B 的六轮常规续训（改学习率 / batch）全部比 681.16 差，所以 B
 
 `training.json` 里额外写了 `configuration.loss`、`configuration.weight_decay` 与 `custom_trainer_sha256`，便于核对"权重是训练循环写出来的，不是手工改的"。
 
+
+
+> **2026-11-25 更正**：本目录实际为 25 份（A 10 / B 5 / C 10）。B 的第 6–10 档是在平台十轮里跑的，本地只留了前 5 档 `training.json`；第 6–10 档的逐轮分数见平台试运行报告。
