@@ -45,23 +45,23 @@ zhixun-harness-1.3.tar   A494FEC45F6223F8DF9917011F97DD27628A83AD50503D25A63B18F
 
 它过不了新 SDK（没有 `describe/train` 入口），但它是**旧协议下的存档证据**：
 
-| 包 | 行数 | 1.3（官方权重） | sdk7（当前提交） |
+| 包 | 行数 | 1.3（官方权重） | sdk14（当前提交） |
 |---|---|---|---|
 | A | 1,244 | Macro-F1 0.7210 | Macro-F1 0.7210 |
 | B | 1,679 | RMSE 681.16 | RMSE **452.13**（十档阶梯，逐轮真训、采纳 3 档） |
 | C | 23,049 | RMSE 50.93 | RMSE 50.07（十轮链首轮续训 900 轮并回滚最好一轮） |
 
 A/C 两列逐位相同（同一份 `predict` 代码、同一份权重）；B 一列也相同——十轮全是 `noop`，交付的就是父检查点本身。
-如果 sdk7 在平台上出任何问题，sdk6 是已完整跑通十轮的那一版，1.3 是更早的存档——两者都在 `dist/` 里。
+如果 sdk14 在平台上出任何问题，sdk6 是已完整跑通十轮的那一版，1.3 是更早的存档——两者都在 `dist/` 里。
 
 ## 怎么跑
 
 新协议（三个入口，平台按这个调）：
 
 ```powershell
-docker load -i dist/zhixun-harness-sdk7.tar
-docker run --rm --network none zhixun-harness:sdk7 describe
-docker run --rm -i --network none zhixun-harness:sdk7 predict < inputs.jsonl > outputs.jsonl
+docker load -i dist/zhixun-harness-sdk14.tar
+docker run --rm --network none zhixun-harness:sdk14 describe
+docker run --rm -i --network none zhixun-harness:sdk14 predict < inputs.jsonl > outputs.jsonl
 ```
 
 旧协议（逐行 stdin/stdout）：
