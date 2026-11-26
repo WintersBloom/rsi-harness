@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -81,13 +82,20 @@ def load_experience(rnd, work: Path) -> dict:
     return _empty_experience()
 
 
-def save_experience(rnd, work: Path, exp: dict) -> None:
+def save_experience(rnd, work: Path, exp: dict, extra: dict | None = None) -> None:
+    """把经验表（以及 extra 里指定的权重文件，如 B 的历史最优）写进 /state。"""
     try:
         out = work / "state_out"
         if out.exists():
             shutil.rmtree(out, ignore_errors=True)
         out.mkdir(parents=True)
         (out / STATE_FILE).write_text(json.dumps(exp, ensure_ascii=False, indent=1), encoding="utf-8")
+        for name, src in (extra or {}).items():
+            try:
+                if Path(src).is_file():
+                    shutil.copyfile(src, out / name)
+            except Exception:
+                pass  # 权重没存上不影响本轮，只是下一轮少了兜底
         rnd.save_state(str(out))
     except Exception:
         pass  # 存不上就下一轮重来，不影响本轮 finish
@@ -320,6 +328,15 @@ def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: st
 
 # ---------- 执行 ----------
 
+def _sha256_file(path: Path) -> str:
+    """返回文件 sha256（只用来打日志，确认父产物是"上一轮候选"还是"内置基线"）。"""
+    h = hashlib.sha256()
+    with Path(path).open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
 def _write_jsonl(rows, path: Path) -> int:
     n = 0
     with path.open("w", encoding="utf-8") as stream:
@@ -370,6 +387,15 @@ def run_round(rnd) -> dict:
     key = rnd.dataset_key
     exp = load_experience(rnd, work)
     exp["rounds"] = int(exp.get("rounds", 0)) + 1
+    # B 的父产物在平台上没有逐轮链上（11-26 实测：每轮 before 都退化成基线分），
+    # 所以"上一轮的最优候选"必须自己留一份，否则拒绝某一档时只能交父检查点=基线。
+    best_prev = work / "b_best_prev.npz"
+    state_best = work / "state_in" / "b_best.npz"
+    if state_best.is_file():
+        try:
+            shutil.copyfile(state_best, best_prev)
+        except Exception:
+            pass
 
     # ---- 1. 监测：拿本轮的规模与上一轮的结局当证据（无标签字段）----
     train_rows = list(rnd.data.training_rows())
@@ -437,6 +463,8 @@ def run_round(rnd) -> dict:
         candidate.mkdir(parents=True)
         parent = _parent_checkpoint(rnd, work, key)
         parent_found = parent is not None
+        if parent is not None:
+            _log("parent=%s sha256=%s" % (parent, _sha256_file(parent)[:16]))
         # B 的档位：用"这一档之前试过几次"定位，与规则层同一口径（每轮前进一档）。
         b_rung = min(_verdict(exp, "b_ladder")["tries"], len(B_LADDER) - 1)
         if action == "b_ladder" and parent is None:
@@ -445,7 +473,10 @@ def run_round(rnd) -> dict:
             # 只交父检查点本身：round 的候选必须是"父模型"或"官方 train_run
             # 从父模型续训得到的产物"，不能是任何手工变换过的权重文件
             # （平台按续训要求审核，手工改造的 checkpoint 会被判非合规）。
-            if parent is not None:
+            if key == "B" and best_prev.is_file():
+                shutil.copyfile(best_prev, candidate / "checkpoint.npz")
+                reason = reason + "（不训练，提交已缓存的历史最优候选）"
+            elif parent is not None:
                 shutil.copyfile(parent, candidate / "checkpoint.npz")
                 reason = reason + "（不训练，提交父检查点原样）"
         else:
@@ -492,7 +523,22 @@ def run_round(rnd) -> dict:
             after = report.get("validation_after") or {}
             metrics = {"before": before, "after": after}
             # 只有验证集分数真的变好才采纳（C 的 300 轮已在开工前验证过，仍走同一道门）。
-            accepted = _better(key, after, before)
+            # B 例外：平台的父产物在 B 上没能逐轮链上，before 恒为基线分，若拿它当基准，
+            # 任何一档都会"接受"，最后一档会覆盖历史最优。所以 B 用 min(before, 历史最优)。
+            if action == "b_ladder":
+                cur = after.get("rmse")
+                hist = exp.get("b_best_rmse")
+                cands = [x for x in (before.get("rmse"), hist) if isinstance(x, (int, float))]
+                base = min(cands) if cands else None
+                accepted = bool(cur is not None and base is not None
+                                and float(cur) < float(base) - 1e-9)
+                if accepted:
+                    exp["b_best_rmse"] = float(cur)
+                _log("b gate: after=%s base=%s accepted=%s"
+                     % (("%.4f" % float(cur)) if cur is not None else "-",
+                        ("%.4f" % float(base)) if base is not None else "-", accepted))
+            else:
+                accepted = _better(key, after, before)
             guard = report.get("guard") or {}
             if action == "c_long" and guard.get("collapsed"):
                 accepted = False
@@ -509,6 +555,10 @@ def run_round(rnd) -> dict:
             if accepted:
                 shutil.copyfile(src, candidate / "checkpoint.npz")
                 shutil.copyfile(out / "training.json", candidate / "training.json")
+            elif key == "B" and best_prev.is_file():
+                shutil.copyfile(best_prev, candidate / "checkpoint.npz")
+                reason = reason + ("（本轮 %s 未刷新历史最优，回退到已缓存的最优候选）"
+                                   % _fmt(key, after))
             else:
                 shutil.copyfile(parent, candidate / "checkpoint.npz")
                 reason = reason + f"（续训后未优于父模型：{_fmt(key, before)} → {_fmt(key, after)}，已回退）"
@@ -592,7 +642,16 @@ def run_round(rnd) -> dict:
         # 只提交一次；失败就如实上报，不换占位文件重试。
         fatal.append("submit %s: %s" % (type(exc).__name__, exc))
 
-    save_experience(rnd, work, exp)
+    # /state 是整目录替换（save_state 会清空重写），所以每轮都要把 B 的最优权重
+    # 写回去：本轮刷新了就写新的，没刷新就把上一轮那份原样带下去。否则一次拒绝
+    # 就会把缓存清掉，下一轮只能退回父检查点（在 B 上=官方基线）。
+    extra = {}
+    if key == "B":
+        if accepted and (candidate / "checkpoint.npz").is_file():
+            extra["b_best.npz"] = candidate / "checkpoint.npz"
+        elif best_prev.is_file():
+            extra["b_best.npz"] = best_prev
+    save_experience(rnd, work, exp, extra)
 
     _log("submit artifact=%s calls=%d fatal=%d elapsed=%.1fs"
          % ((submitted or {}).get("artifact_id", "none"),
