@@ -163,6 +163,19 @@ def _verdict(exp: dict, action: str) -> dict:
             "status": rec.get("status", "open")}
 
 
+def _verdict_brief(exp: dict, key: str) -> list:
+    """候选动作的紧凑战绩：试过几次、收了几次、最好一次涨了多少。
+
+    完整 verdict 有五个字段，三个候选动作在 prompt 里要占 200 多字符，而模型
+    真正需要的只是"这个方向试过多少、成过多少"。实测每次调用的输入 token
+    是主要成本（输出被 /no_think 压在 360 以内，且不能再压——见 ask_model 注释）。
+    """
+    rec = (exp.get("directions", {}) or {}).get(key) or {}
+    best = rec.get("best_delta")
+    return [int(rec.get("tries", 0)), int(rec.get("accepts", 0)),
+            None if best is None else round(float(best), 4)]
+
+
 def _plateau(exp: dict, key: str) -> dict:
     return exp.get("plateau", {}) or {}
 
@@ -265,15 +278,14 @@ def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: st
         "last_delta": evidence.get("last_delta"),
         "last_rejected": evidence.get("last_rejected"),
         "train_rows": evidence.get("train_rows"),
-        "candidates": {a: _verdict(exp, a) for a in ranked},
+        "candidates": {a: _verdict_brief(exp, a) for a in ranked},
         "plateau": _plateau(exp, evidence.get("dataset_key", "A")),
         "allowed_actions": ranked,
     }
     prompt = (
-        "你是训练轮的动作选择器。下面是无标签的监测证据与历史战绩。"
-        "只能在 allowed_actions 里选一个动作，输出一行 JSON："
-        '{"action":"<动作名>","reason":"<不超过80字的中文理由>"}。'
-        "不要输出其他任何内容。\n" + json.dumps(payload, ensure_ascii=False)
+        "动作选择器。候选见 allowed_actions，战绩见 candidates。"
+        "只输出一行 JSON，不要别的字："
+        '{"action":"<动作名>","reason":"<≤20字>"}。\n' + json.dumps(payload, ensure_ascii=False)
     )
     # Qwen3 系列是"先思考再回答"的模型：官方端点不支持 chat_template_kwargs 关思考，
     # 思考会吃掉整个 max_tokens 预算，content 直接为空（实测 200/400 token 时 100% 为空）。
@@ -281,8 +293,10 @@ def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: st
     # 规则动作，本轮照常继续（每轮只允许一次有意义的调用，重发属于凑数）。
     # 但 SDK 的 round.py:179 规定 max_tokens 不得超过 rnd.max_output_tokens（否则 MAX_TOKENS_INVALID），
     # 平台实测值可能只有 128（见 SDK tests），所以这里绝不虚抬下限。
+    # 输出只要一行 JSON（动作 + ≤20 字理由）。900 太多（实测平均 434），但压到 160 有
+    # 截断风险（Qwen3 即使 /no_think 也会先吐几个字），所以取 320 这个保守值。
     cap = int(getattr(rnd, "max_output_tokens", 0) or 0)
-    budget = max(1, min(900, cap)) if cap > 0 else 900
+    budget = max(1, min(320, cap)) if cap > 0 else 320
     tries = 1
     last_text = ""
     call_id = None
@@ -431,6 +445,16 @@ def run_round(rnd) -> dict:
             action, reason, call_id, llm_status, llm_budget = ask_model(
                 rnd, evidence, exp, fallback, fallback_reason,
                 allowed=("b_ladder", "noop"))
+        elif key == "C":
+            # C 只允许一次长程续训：跑过之后候选集里只剩 noop，模型只能在"不动"里选。
+            # 之前不限制，模型在第 8/9/10 轮又选了 retrain_300（接受门当时只看 RMSE，
+            # 三次都被判接受），把隐藏流 NASA 从 5.6e9 拉到 1.33e11 —— 最好的 C 模型
+            # 第 1 轮就拿到了，后面三次重训把它弄坏了（正式评测最差阶段 −2.162 的由来）。
+            fallback, fallback_reason = choose_by_rules(exp, key, evidence)
+            ran = _verdict(exp, "c_long")["tries"] > 0
+            action, reason, call_id, llm_status, llm_budget = ask_model(
+                rnd, evidence, exp, fallback, fallback_reason,
+                allowed=("noop",) if ran else ("c_long", "noop"))
         else:
             fallback, fallback_reason = choose_by_rules(exp, key, evidence)
             action, reason, call_id, llm_status, llm_budget = ask_model(

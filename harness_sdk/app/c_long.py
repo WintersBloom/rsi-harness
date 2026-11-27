@@ -10,6 +10,7 @@
 """
 import json
 import math
+import re
 import time
 from pathlib import Path
 
@@ -22,9 +23,20 @@ DEFAULT_EPOCHS = 900
 DEFAULT_LR = 0.002
 # 预测标准差低于这个值就算"塌成常数"，本轮不提交。
 MIN_PRED_STD = 1.0
+# 同一个发动机的预测值应随周期单调不增；违反时罚一项，权重见 MONO_LAMBDA。
+MONO_LAMBDA = 0.5
+MONO_PAIRS = 256
 
 
-def _fit_epoch(model, x, y):
+def _consecutive_pairs(ids):
+    """返回同一台发动机相邻两个周期的样本下标对（前, 后）。"""
+    unit = np.array([int(re.search(r"_u(\d+)_c(\d+)$", i).group(1)) for i in ids])
+    cycle = np.array([int(re.search(r"_u(\d+)_c(\d+)$", i).group(2)) for i in ids])
+    head = np.where((unit[1:] == unit[:-1]) & (cycle[1:] == cycle[:-1] + 1))[0]
+    return head, head + 1
+
+
+def _fit_epoch(model, x, y, early=None, late=None, lam=0.0):
     """一个 epoch 的官方训练逻辑（MSE + Adam + 裁剪 5.0），原样照抄。"""
     x = model.normalized(x)
     target = (y - model.meta["target_mean"]) / model.meta["target_scale"]
@@ -41,6 +53,22 @@ def _fit_epoch(model, x, y):
         gradients = {"w2": hidden.T @ delta, "b2": delta.sum(axis=0)}
         hidden_delta = (delta @ model.params["w2"].T) * (1 - hidden ** 2)
         gradients.update(w1=batch.T @ hidden_delta, b1=hidden_delta.sum(axis=0))
+
+        if lam > 0 and early is not None and len(early):
+            pick = rng.choice(len(early), size=min(MONO_PAIRS, len(early)), replace=False)
+            ei, li = early[pick], late[pick]
+            pair_x = x[np.concatenate([ei, li])]
+            pair_hidden, pair_logits = model.forward(pair_x)
+            count = len(pick)
+            z_early, z_late = pair_logits[:count, 0], pair_logits[count:, 0]
+            violated = (z_late - z_early) > 0
+            weight = violated.astype(float) * (lam / count)
+            penalty_delta = np.concatenate([-weight, weight])[:, None]
+            gradients["w2"] = gradients["w2"] + pair_hidden.T @ penalty_delta
+            gradients["b2"] = gradients["b2"] + penalty_delta.sum(axis=0)
+            pair_delta = (penalty_delta @ model.params["w2"].T) * (1 - pair_hidden ** 2)
+            gradients["w1"] = gradients["w1"] + pair_x.T @ pair_delta
+            gradients["b1"] = gradients["b1"] + pair_delta.sum(axis=0)
 
         norm = math.sqrt(sum(float(np.sum(g * g)) for g in gradients.values()))
         if not math.isfinite(norm):
@@ -84,7 +112,8 @@ def _restore(model, snap):
 
 def train_run(profile, train_path, validation_path, output, *, resume=None, epochs=None,
               learning_rate=None, batch_size=None, seed=None, stage_id="baseline",
-              keep_best=True, min_pred_std=MIN_PRED_STD, label_provenance=None):
+              keep_best=True, min_pred_std=MIN_PRED_STD, label_provenance=None,
+              monotonic_lambda=MONO_LAMBDA):
     """与官方 `baselines.train.train_run` 同签名、同产物；内部多做了逐轮验证与回滚。"""
     output = Path(output)
     if output.exists():
@@ -122,6 +151,8 @@ def train_run(profile, train_path, validation_path, output, *, resume=None, epoc
     if not 1 <= epochs <= 10000:
         raise ValueError("epochs must be in 1..10000")
 
+    lam = float(monotonic_lambda or 0.0)
+    early, late = _consecutive_pairs(train["ids"]) if lam > 0 else (None, None)
     initial_steps, initial_epochs = int(model.meta["steps"]), int(model.meta["epochs"])
     before = _metrics(model, validation)
     started = time.monotonic()
@@ -131,7 +162,7 @@ def train_run(profile, train_path, validation_path, output, *, resume=None, epoc
     best_epoch = initial_epochs
     records = []
     for _ in range(epochs):
-        _fit_epoch(model, train["x"], train["y"])
+        _fit_epoch(model, train["x"], train["y"], early, late, lam)
         current = _metrics(model, validation)
         records.append({"epoch": int(model.meta["epochs"]), "step": int(model.meta["steps"]),
                         "validation": {"mae": current["mae"], "rmse": current["rmse"],
@@ -181,6 +212,8 @@ def train_run(profile, train_path, validation_path, output, *, resume=None, epoc
         "validation_final_epoch": {"mae": final["mae"], "rmse": final["rmse"]},
         "kept_best_epoch": int(best_epoch),
         "trainer": "c_long",
+        "monotonic_lambda": float(lam),
+        "monotonic_pairs": int(0 if early is None else len(early)),
         "guard": {"collapsed": bool(collapsed), "pred_std": float(kept["pred_std"]),
                   "min_pred_std": float(min_pred_std)},
     }
