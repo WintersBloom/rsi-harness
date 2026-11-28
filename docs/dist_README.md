@@ -6,9 +6,9 @@
 
 | 文件 | 大小 | 协议 | 用途 |
 |---|---|---|---|
-| `zhixun-harness-sdk16.tar` | 90,536,960 B | **新**（`contest.harness.workspace.v2`，三入口 `describe/train/predict`） | **提交用这个**。与 `sdk15` 只差两处：① C 首轮续训加**单调性正则**（同一发动机的预测随周期单调不增），公开验证集 RMSE 50.22、**NASA 5.61e9 → 3.66e9（−35%）**；② 决策调用的输出预算 900 → 320、prompt 精简（压"单位增益 Token"） |
-| `zhixun-harness-sdk15.tar` | 90,533,888 B | 同上 | 已被 `sdk16` 取代；正式评测 #1（**14.287587/35**）用的就是它 |
-| `zhixun-harness-sdk12.tar` | 90.5 MB | 同上 | 已被 `sdk16` 取代（只差 C 包 900 轮长程续训）；每轮只发一次模型调用；不交占位文件 |
+| `zhixun-harness-sdk20.tar` | 90,568,192 B | **新**（`contest.harness.workspace.v2`，三入口 `describe/train/predict`） | **提交用这个**。与 `sdk15` 只差两处：① C 首轮续训加**单调性正则**（同一发动机的预测随周期单调不增），公开验证集 RMSE 50.22、**NASA 5.61e9 → 3.66e9（−35%）**；② 决策调用的输出预算 900 → 320、prompt 精简（压"单位增益 Token"） |
+| `zhixun-harness-sdk15.tar` | 90,533,888 B | 同上 | 已被 `sdk20` 取代；正式评测 #1（**14.287587/35**）用的就是它 |
+| `zhixun-harness-sdk12.tar` | 90.5 MB | 同上 | 已被 `sdk20` 取代（只差 C 包 900 轮长程续训）；每轮只发一次模型调用；不交占位文件 |
 | `zhixun-harness-sdk10.tar` | 90.5 MB | 同上 | 已被 `sdk11` 取代（只差预检四项的兜底整改） |
 | `zhixun-harness-sdk11.tar` | 90.5 MB | 同上 | 已被 `sdk12` 取代（B 由一次性收缩改成十档阶梯） |
 | `zhixun-harness-sdk7.tar` | 90.5 MB | 同上 | **作废，不要提交**。B 包当年交的是手工收缩权重，被判不合规 |
@@ -20,22 +20,23 @@
 sha256：
 
 ```
-zhixun-harness-sdk16.tar C0BA500E7B8A5CC77F1BD63A2C9E3133D806DC7D01E3646F29D14A3141850BAE
+zhixun-harness-sdk20.tar 572D39D41616E022203C712F93A3CB85C82B80CC53BD3A3B4CDFE149FDB34A75
 zhixun-harness-sdk15.tar 860FEBDCED3B101FBDD5780ADBF640AD93E4A7CA6FAAA692FD796998808833AD
 zhixun-harness-sdk7.tar  5E3247A8B83A6344EE5C22144EC47692408CB65248115E9EED205F6780BDA82E  (作废)
 zhixun-harness-sdk6.tar  0469AD11C2B711A9523D6BC85D8BD2C2E0DCA925B2554152B6B630708CE1C0A3
 zhixun-harness-1.3.tar   A494FEC45F6223F8DF9917011F97DD27628A83AD50503D25A63B18F34855375F
 ```
 
-> **sdk16 相对 sdk7 改了十处**：① `/app/checkpoints/B.npz` 换回**官方父检查点原样**（sha256 `C7D819FC…3314B4`），删掉"noop 时提交手工收缩权重"的分支；② 新增 `/app/b_regularized.py`（与官方 `train_run` 同签名同产物的自写 trainer，MAE + L2）；③ `configs/B.json` 由三分类改回官方的 `regression` + `target_unit: minutes`（旧配置会让 B 的续训直接抛 `ValueError`）；④ B 的动作从一次性 `b_shrink` 改成**十档阶梯 `b_ladder`**：每轮从父检查点真训一档、只有验证集变好才采纳，公开验证集 681.1598 → 470.76 → 459.76 → **452.13**（采纳 3 档、回退 7 档）；⑤ C 新增 `retrain_300`（首轮一次性 300 轮，50.93→50.45）；⑥ `sdk13` 起对模型网关的 502/503/504/超时**重发同一份完整请求**（最多 3 次），401/403/400 与空回复不重试。
+> **sdk20 相对 sdk7 改了十一处**：① `/app/checkpoints/B.npz` 换回**官方父检查点原样**（sha256 `C7D819FC…3314B4`），删掉"noop 时提交手工收缩权重"的分支；② 新增 `/app/b_regularized.py`（与官方 `train_run` 同签名同产物的自写 trainer，MAE + L2）；③ `configs/B.json` 由三分类改回官方的 `regression` + `target_unit: minutes`（旧配置会让 B 的续训直接抛 `ValueError`）；④ B 的动作从一次性 `b_shrink` 改成**十档阶梯 `b_ladder`**：每轮从父检查点真训一档、只有验证集变好才采纳，公开验证集 681.1598 → 470.76 → 459.76 → **452.13**（采纳 3 档、回退 7 档）；⑤ C 新增 `retrain_300`（首轮一次性 300 轮，50.93→50.45）；⑥ `sdk13` 起对模型网关的 502/503/504/超时**重发同一份完整请求**（最多 3 次），401/403/400 与空回复不重试。
 > ⑧ 新增 `/app/c_long.py`：C 包首轮一次续训 **900 轮**（lr 0.002）、回滚到验证最好的那一轮、并加"塌成常数"护栏（预测标准差 < 1 即本轮不提交）；C 首轮 50.93 → **50.07**。
-> ⑨ **B 的接受判据改用历史最优**：11-26 试运行暴露出平台侧 B 的父产物没逐轮链上（每轮 `before` 都是基线分），拿它当基准等于"任何一档都算变好"，第 9、10 档会把第 7 档的最优值覆盖掉（隐藏流 374.94 → 603.54）。现在改成 `base = min(本轮父模型分, 历史最优 RMSE)`，只有刷新最优才接受；被拒的轮次提交**缓存在 `/state` 里的历史最优候选**，而不是父检查点（B 的父检查点就是官方基线）。同时每轮把父产物的 sha256 打进 stderr，下次能直接看出"链没链上"。
+> ⑨ **（`sdk20` 已撤回）B 的"历史最优判据"**：`sdk15`–`sdk16` 曾用`base = min(本轮父模型分, 历史最优 RMSE)` 并在被拒时提交缓存的历史最优候选。平台第二轮预检指出这等于**在当前验证流上挑模型**，`sdk20` 已改回：只看训练报告里那份固定验证集的 `before/after`，被拒一律交父检查点，`/state` 里不再缓存权重。
 > ⑩ **C 首轮加单调性正则（`sdk16`）**：`c_long` 在 MSE 之外加一项"同一台发动机相邻周期，后一轮预测若高于前一轮就罚"（λ=0.5，配对数 112,593），其余（Adam、裁剪 5.0、lr 0.002、900 轮、回滚最优轮）不变。公开验证集 RMSE 50.2190（原 50.0744）、**NASA 3.664e9（原 5.608e9，官方冻结 5.823e9）**、`steps` 55250 → 344760。依据：正式 #1 里 C 的 RMSE 与基线几乎相同（55.7955 vs 55.8126）却拿到 −0.34 的增益，说明 C 的分数由 NASA 主导，压 RMSE 无用、压 NASA 才有用。
+> ⑪ **按平台第二轮预检四条整改（`sdk20`）**：① 删除 C 的 `_calibrate` 在线校准（那是用 `meta.unit/cycle` 反推答案，`contest_harness/predict.py` 已恢复 SDK 原样、不再读 `meta`）；② 删除 predict 的常量兜底（加载失败/特征错位/非有限值一律显式 `raise`，不再用 0.0 或 Ethanol 顶替）；③ 删除 `/app/b_regularized.py`，B 回到官方 `baselines/train.py` 的 MSE 常规续训，**增益如实报 0**；④ 接受判据只用训练报告里那份固定验证集的 `before/after`，不再拿当轮验证流重新打分挑模型，`/state` 里也不再缓存"历史最优权重"（每轮候选只能是父检查点或由它续训出的产物）。
 > 另：决策调用的 `max_out` 由 900 降到 **320**、prompt 从"五字段 verdict"瘦成"三元素 brief + ≤20 字理由"——正式 #1 每次调用平均 672 in + 434 out，这项进的是"单位增益 Token"分档。
 >
 > 为什么撤回手工收缩：v3 提交被平台判为 `noncompliant`，原话是「请基于官方 baseline 及平台提供的父检查点实现真实续训，不要从头训练其他模型」。收缩版权重 `steps` 不变、`metadata` 里带 `shrink_alpha`，属于在权重文件上做手工变换，不满足"候选必须来自续训"——已撤回、`sdk7` 作废。
 >
-> 按同一思路重做的合规版：B 每轮由 `/app/b_regularized.py`（MAE + L2，与官方 `train_run` 同签名）从父检查点按十档阶梯真训一次，`steps` 逐轮增长，公开验证集 **681.16 → 470.76 → 459.76 → 452.13**。分数与手工版方向一致，区别在"每一档权重都是训练写出来的"。
+> 之后又试过把 MAE + L2 做进训练器（`b_regularized.py`，公开验证集 681.16 → 452.13）：权重确实由优化器写出，但平台判定这是**把模型压成常数、靠退化权重过关**，要求恢复常规 MSE。`sdk20` 已删除该训练器，B 回到官方 `baselines/train.py`，十轮全部「没变好 → 交父检查点」，**增益如实报 0**。
 
 > sdk6 相对 sdk5 只加了一件事：**训练日志写 stderr**（`[zhixun] start/decide/train/submit`、失败打完整 traceback）。SDK 在加载选手模块前已把 fd1 指向 stderr（`protocol.py:36-42`），协议帧走另一份 dup，实测 `predict` 100 行仍是 100 行合法 JSON、stderr 0 字节。
 >
@@ -50,23 +51,23 @@ zhixun-harness-1.3.tar   A494FEC45F6223F8DF9917011F97DD27628A83AD50503D25A63B18F
 
 它过不了新 SDK（没有 `describe/train` 入口），但它是**旧协议下的存档证据**：
 
-| 包 | 行数 | 1.3（官方权重） | sdk16（当前提交） |
+| 包 | 行数 | 1.3（官方权重） | sdk20（当前提交） |
 |---|---|---|---|
 | A | 1,244 | Macro-F1 0.7210 | Macro-F1 0.7210 |
-| B | 1,679 | RMSE 681.16 | RMSE **452.13**（十档阶梯，逐轮真训、采纳 3 档） |
+| B | 1,679 | RMSE 681.16 | RMSE **681.16**（0 增益：六方向续训全负、十轮全被回退） |
 | C | 23,049 | RMSE 50.93 | RMSE 50.22（十轮链首轮续训 900 轮并回滚最好一轮） |
 
 A/C 两列逐位相同（同一份 `predict` 代码、同一份权重）；B 一列也相同——十轮全是 `noop`，交付的就是父检查点本身。
-如果 sdk16 在平台上出任何问题，sdk6 是已完整跑通十轮的那一版，1.3 是更早的存档——两者都在 `dist/` 里。
+如果 sdk20 在平台上出任何问题，sdk6 是已完整跑通十轮的那一版，1.3 是更早的存档——两者都在 `dist/` 里。
 
 ## 怎么跑
 
 新协议（三个入口，平台按这个调）：
 
 ```powershell
-docker load -i dist/zhixun-harness-sdk16.tar
-docker run --rm --network none zhixun-harness:sdk16 describe
-docker run --rm -i --network none zhixun-harness:sdk16 predict < inputs.jsonl > outputs.jsonl
+docker load -i dist/zhixun-harness-sdk20.tar
+docker run --rm --network none zhixun-harness:sdk20 describe
+docker run --rm -i --network none zhixun-harness:sdk20 predict < inputs.jsonl > outputs.jsonl
 ```
 
 旧协议（逐行 stdin/stdout）：

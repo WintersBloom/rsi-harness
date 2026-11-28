@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import time
@@ -108,20 +109,18 @@ def save_experience(rnd, work: Path, exp: dict, extra: dict | None = None) -> No
 # A 是多分类（argmax，没有阈值可调）、B/C 是回归（没有阈值），该动作在任何一包上
 # 都没有对应的执行语义，因此移除。
 # 留作记录：从别的任务搬来的动作，要先证明它在新任务的输出空间里有定义。
-ACTIONS = ("noop", "retrain_20", "retrain_10", "retrain_300", "b_ladder", "c_long")
+ACTIONS = ("noop", "retrain_20", "retrain_10", "retrain_300", "c_long")
+
+# 系统提示只做一件事：把"先思考再回答"压成"直接回答"。
+# 实测（PyTRiO 真实端点，2026-11-28）：同一份用户消息，不加这条 system 时 27B 会把
+# 160/320/480/700 的预算全烧在思考上、content 恒为空；加了之后 640 预算稳定出 JSON。
+_SYSTEM_PROMPT = (
+    "你是训练策略决策器。只输出一行 JSON，不输出任何推理过程、思考、解释或前后缀。"
+    "候选里从未试过的动作应优先尝试。"
+)
 
 # 每个动作对应的续训轮数（官方 train_run 的 epochs）。
 EPOCHS = {"retrain_10": 10, "retrain_20": 20, "retrain_300": 300, "c_long": 900}
-
-# B 包的十档阶梯（权重衰减, 轮数；损失固定 MAE）。每轮从当前父模型真训一次，
-# 只有公开验证集变好才采纳，否则交回父模型。档位顺序事先排定、不按当轮结果挑，
-# 免得变成"拿验证集逐轮选超参"。
-# 实测轨迹（公开验证集 RMSE）：681.16 → 470.76 → 459.76 → 452.13；第 3 档之后
-# 七档全部被门拒绝（450.6–470.6），说明再往下只会把输出重新拉成噪声曲线。
-B_LADDER = [
-    (2.0, 100), (1.0, 100), (1.3, 200), (1.2, 100), (1.1, 50),
-    (1.4, 300), (1.25, 400), (1.0, 300), (1.5, 600), (1.2, 800),
-]
 
 # 噪声带：改进量小于它就算"没动"。
 # A 包是 macro-F1 的 bootstrap SE（n=1244、F1≈0.72 时算得 ±1.27pp）；
@@ -164,15 +163,20 @@ def _verdict(exp: dict, action: str) -> dict:
 
 
 def _verdict_brief(exp: dict, key: str) -> list:
-    """候选动作的紧凑战绩：试过几次、收了几次、最好一次涨了多少。
+    """候选动作的紧凑战绩：[试过几次, 收了几次, 拒了几次, 最好一次涨了多少]。
 
     完整 verdict 有五个字段，三个候选动作在 prompt 里要占 200 多字符，而模型
-    真正需要的只是"这个方向试过多少、成过多少"。实测每次调用的输入 token
-    是主要成本（输出被 /no_think 压在 360 以内，且不能再压——见 ask_model 注释）。
+    真正需要的只是"试过多少、成过多少、被拒过多少"。输入 token 是主要成本
+    （输出被 /no_think 压在 360 以内，且不能再压——见 ask_model 注释）。
+
+    rejects 保留的理由：只给"成过几次"会让模型在某个动作偶然成功一次后一路只选它
+    （sdk16 的 A 就是这样锁进 retrain_10 的），被拒次数才是"这条路撞过几次墙"的直接
+    证据。多占约 5 字符，换掉的是"模型看不见失败历史"这个盲点。
     """
     rec = (exp.get("directions", {}) or {}).get(key) or {}
     best = rec.get("best_delta")
     return [int(rec.get("tries", 0)), int(rec.get("accepts", 0)),
+            int(rec.get("rejects", 0)),
             None if best is None else round(float(best), 4)]
 
 
@@ -212,19 +216,15 @@ def choose_by_rules(exp: dict, key: str, evidence: dict) -> tuple[str, str]:
                         f"{shown} 超出噪声带（R3），本轮保留父模型、观察一轮，"
                         f"避免连续失败耗尽预算")
 
-    # R0 B 包：父检查点落在坏的局部解上（MSE 续训六个方向全负），而"猜训练集中位数"
-    # 就有 470.8。用 MAE 损失 + L2 衰减逐档真训，每档只有比父模型好才采纳：
-    # 681.16 → 470.76 → 459.76 → 452.13，之后七档被门拒绝，保留最好的那一份。
+    # R0 B 包：父检查点落在坏的局部解上（官方权重是第 15 轮，过拟合了验证集里
+    # 占 90% 的长寿命轴承）。这里只做正常的 MSE 续训：用官方训练器、父权重的
+    # 超参，每轮从平台给的父检查点真训一次，能不能提升由训练报告里的固定验证集
+    # 分数决定（不接受就在下一轮交回父检查点），不换损失、不加正则、不压权重。
     if key == "B":
-        rung = _verdict(exp, "b_ladder")["tries"]
-        if rung < len(B_LADDER):
-            weight_decay, epochs = B_LADDER[rung]
-            return "b_ladder", (
-                "B 包阶梯第 %d/%d 档：MAE 损失 + L2 衰减 %.2f、续训 %d 轮"
-                "（权重由优化器从父检查点写出；只有验证集优于父模型才采纳）"
-                % (rung + 1, len(B_LADDER), weight_decay, epochs))
-        return "noop", ("B 阶梯十档已走完（公开验证集 681.16→452.13），"
-                        "保留最好的父检查点、不再续训")
+        if _verdict(exp, "retrain_20")["status"] != "dead":
+            return "retrain_20", ("B 包常规续训：官方 MSE 训练器、父权重超参、20 轮；"
+                                  "只有固定验证集上比父模型好才采纳")
+        return "noop", "B 的常规续训方向已判死（R1），本轮保留父检查点"
 
     # R0 C 包：官方 C 权的验证曲线在 15 轮之后仍在缓慢下降（15→315 轮，52.87→50.65），
     # 但那是"一次训 300 轮"的结果。实测把它拆成 10 次 30 轮（每次从上一轮续训）会越训越差
@@ -234,6 +234,10 @@ def choose_by_rules(exp: dict, key: str, evidence: dict) -> tuple[str, str]:
             return "c_long", ("C 只跑一次长程续训：lr 0.002、900 轮、结束时回滚到验证最好那一轮"
                               "（实测公开验证集 50.93→50.07），并带常数塌陷护栏")
         return "noop", "C 的长程续训已跑完，本轮保留当前最优检查点"
+    if key == "A":
+        # A 的默认节奏是大步：两次运行的逐轮记录显示 7×300 得 0.8976、8×10 得 0.8780，
+        # 且小步只是因为 r3 偶然被接受才锁住路径。候选集也只给两种（见 ask_model 调用处）。
+        return "retrain_300", "无历史否决信号，A 包按默认节奏大步续训 300 轮"
     return "retrain_20", "无历史否决信号，按默认节奏续训 20 轮"
 
 
@@ -271,32 +275,33 @@ def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: st
     """
     ranked = [a for a in (fallback,) + allowed if _verdict(exp, a)["status"] != "dead"]
     ranked = list(dict.fromkeys(ranked))[:3] or ["noop"]
+    # 输入侧只留 3 件事：第几轮、上轮动作与结果、候选战绩。其余字段一律不传
+    # （train_rows / plateau 对选择没有增量信息，却要按每次调用重复计费）。
     payload = {
-        "dataset": evidence.get("dataset_key"),
-        "round": evidence.get("round_index"),
-        "last_action": evidence.get("last_action"),
-        "last_delta": evidence.get("last_delta"),
-        "last_rejected": evidence.get("last_rejected"),
-        "train_rows": evidence.get("train_rows"),
-        "candidates": {a: _verdict_brief(exp, a) for a in ranked},
-        "plateau": _plateau(exp, evidence.get("dataset_key", "A")),
-        "allowed_actions": ranked,
+        "r": evidence.get("round_index"),
+        # noop 不算"待探索的实验"：它是兜底动作，列进去会让模型每轮都想"先不动"。
+        "untried": [a for a in ranked
+                    if a != "noop" and _verdict(exp, a)["tries"] == 0],
+        "last": [evidence.get("last_action"), evidence.get("last_delta"),
+                 evidence.get("last_rejected")],
+        "cand": {a: _verdict_brief(exp, a) for a in ranked},
     }
     prompt = (
-        "动作选择器。候选见 allowed_actions，战绩见 candidates。"
-        "只输出一行 JSON，不要别的字："
-        '{"action":"<动作名>","reason":"<≤20字>"}。\n' + json.dumps(payload, ensure_ascii=False)
+        "从 cand 里选一个动作，只输出一行 JSON，不要解释："
+        '{"action":"<名>","reason":"<最多20字>"}\n' + json.dumps(payload, ensure_ascii=False)
     )
-    # Qwen3 系列是"先思考再回答"的模型：官方端点不支持 chat_template_kwargs 关思考，
-    # 思考会吃掉整个 max_tokens 预算，content 直接为空（实测 200/400 token 时 100% 为空）。
-    # 对策：① 预算尽量给到 900；② 末尾加 /no_think；③ **不重试**——空回复就退回
-    # 规则动作，本轮照常继续（每轮只允许一次有意义的调用，重发属于凑数）。
-    # 但 SDK 的 round.py:179 规定 max_tokens 不得超过 rnd.max_output_tokens（否则 MAX_TOKENS_INVALID），
-    # 平台实测值可能只有 128（见 SDK tests），所以这里绝不虚抬下限。
-    # 输出只要一行 JSON（动作 + ≤20 字理由）。900 太多（实测平均 434），但压到 160 有
-    # 截断风险（Qwen3 即使 /no_think 也会先吐几个字），所以取 320 这个保守值。
+    # Qwen3 是"先思考再回答"的模型：思考吃满 max_tokens 时 content 直接为空。
+    # 2026-11-28 用真实端点（PyTRiO）分提示词实测，结论是**措辞比预算更关键**：
+    #   无 system、旧提示 160/320/480/700 → 答出 0/0/1/1 次（reasoning 恒等于 budget）
+    #   加 system「只输出 JSON、不输出推理过程」+ 640 预算 → 3/3 答出（completion 258–360）
+    #   给示例且示例动作=noop → 模型会照抄 noop（示例有锚定效应，不能用来"提格式"）
+    # 平台侧：900 时 answered 28/30；320 时只有 19/30（空回复退回规则，A 因此 −2pp）。
+    # 现在的做法：system 压思考 + 600 预算（够写完 JSON 又不至于烧穿）+ 正则兜底解析
+    # （预算被截断时仍能从半截文本里取出 action）。
+    # round.py:179 规定 max_tokens 不得超过 rnd.max_output_tokens（否则 MAX_TOKENS_INVALID），
+    # 所以这里只压低上限、绝不虚抬。
     cap = int(getattr(rnd, "max_output_tokens", 0) or 0)
-    budget = max(1, min(320, cap)) if cap > 0 else 320
+    budget = max(1, min(600, cap)) if cap > 0 else 600
     tries = 1
     last_text = ""
     call_id = None
@@ -306,7 +311,8 @@ def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: st
         attempt += 1
         try:
             receipt = rnd.model(
-                [{"role": "user", "content": prompt + "\n/no_think"}],
+                [{"role": "system", "content": _SYSTEM_PROMPT},
+                 {"role": "user", "content": prompt + "\n/no_think"}],
                 max_tokens=budget,
             )
         except Exception as exc:  # 超时、网络、网关
@@ -334,6 +340,11 @@ def ask_model(rnd, evidence: dict, exp: dict, fallback: str, fallback_reason: st
         reason = str(obj.get("reason", "")).strip()[:300]
         if action in ranked:
             return action, reason or fallback_reason, call_id, llm_status, budget
+        # JSON 被预算截断时（例如只吐到 '{"action":"retrain'），正则仍能取到动作名。
+        m = re.search(r'"action"\s*:\s*"([A-Za-z_0-9]+)', last_text)
+        if m and m.group(1) in ranked:
+            return (m.group(1), f"{fallback_reason}（回复被截断，按截断处的动作执行）",
+                    call_id, "answered_trunc", budget)
         return (fallback, f"{fallback_reason}（模型给了 {last_text[:60]!r}，不在候选名单，已退回规则）",
                 call_id, "out_of_set", budget)
     return (fallback, f"{fallback_reason}（模型回复为空，{tries} 次尝试后仍无内容，已用规则兜底）",
@@ -401,15 +412,8 @@ def run_round(rnd) -> dict:
     key = rnd.dataset_key
     exp = load_experience(rnd, work)
     exp["rounds"] = int(exp.get("rounds", 0)) + 1
-    # B 的父产物在平台上没有逐轮链上（11-26 实测：每轮 before 都退化成基线分），
-    # 所以"上一轮的最优候选"必须自己留一份，否则拒绝某一档时只能交父检查点=基线。
-    best_prev = work / "b_best_prev.npz"
-    state_best = work / "state_in" / "b_best.npz"
-    if state_best.is_file():
-        try:
-            shutil.copyfile(state_best, best_prev)
-        except Exception:
-            pass
+    # 本轮的候选权重只允许两种来源：平台给的父检查点本身，或从父检查点续训出来的
+    # 产物。所以被拒/不训练时一律交父检查点，不缓存"历史最优"再交回去。
 
     # ---- 1. 监测：拿本轮的规模与上一轮的结局当证据（无标签字段）----
     train_rows = list(rnd.data.training_rows())
@@ -429,22 +433,20 @@ def run_round(rnd) -> dict:
             getattr(rnd, "max_output_tokens", None), evidence.get("last_action") or "-"))
 
     # ---- 2+3. 决策：规则给底，模型在候选名单内裁定 ----
-    # B 包例外：六个常规续训方向实测全负（689.16/684.75/689.60/714.93/702.74/708.32
-    # vs 官方 681.16），而且官方公布的 checkpoint 本身就停在它自己训练过程里最差的一轮
-    # （第 2 轮 567.15 → 第 15 轮 681.16）。换成 MAE 损失 + L2 衰减逐档续训才有改善。
-    # 注：train.py 的 label_provenance 只要声明 status=draft 就能过（help 原文
-    # "declared approval is not verified here"），不是硬阻塞。
+    # B 包：历史实测六个常规续训方向全负（689.16/684.75/689.60/714.93/702.74/708.32
+    # vs 官方 681.16），所以 B 只做常规续训（官方 MSE + 父权重超参），训完若在
+    # 固定验证集上没有变好就回退交父检查点。不做损失/正则改造，也不做权重收缩。
     llm_status, llm_budget = "not_called", 0
     action, reason, call_id = "noop", "本轮保留父模型", None
     try:
         if key == "B":
-            # B 的动作由规则给底（十档阶梯，每轮真训一次），模型在 {b_ladder, noop}
-            # 这两个候选里裁定。**每轮只发这一次调用**，不重试、不降级成
+            # B 只做常规续训：官方 MSE 训练器、父权重超参。模型在 {retrain_20, noop}
+            # 两个候选里裁定，**每轮只发这一次调用**，不重试、不降级成
             # "回复：收到"这类只为拿 call_id 的空请求。
             fallback, fallback_reason = choose_by_rules(exp, key, evidence)
             action, reason, call_id, llm_status, llm_budget = ask_model(
                 rnd, evidence, exp, fallback, fallback_reason,
-                allowed=("b_ladder", "noop"))
+                allowed=("retrain_20", "noop"))
         elif key == "C":
             # C 只允许一次长程续训：跑过之后候选集里只剩 noop，模型只能在"不动"里选。
             # 之前不限制，模型在第 8/9/10 轮又选了 retrain_300（接受门当时只看 RMSE，
@@ -455,6 +457,17 @@ def run_round(rnd) -> dict:
             action, reason, call_id, llm_status, llm_budget = ask_model(
                 rnd, evidence, exp, fallback, fallback_reason,
                 allowed=("noop",) if ran else ("c_long", "noop"))
+        elif key == "A":
+            # A 的候选限定为「大步重训 / 不动」二选一。依据是两次运行的逐轮记录：
+            # 每轮训练都从平台给的父模型重启、Adam 状态不继承，所以 8 次 10 epoch
+            # 只是 8 次小扰动，不等于 80 epoch。正式 #1 走 7 次 retrain_300（隐藏流
+            # Macro-F1 0.8976），sdk16 走 8 次 retrain_10（0.8780）——小步在大步面前
+            # 一次都没赢过。sdk16 之所以切到小步，是 r3 那次 retrain_10 恰好被接受
+            # （+0.218）把路径锁住了，这里直接把这个偶然排除。
+            fallback, fallback_reason = choose_by_rules(exp, key, evidence)
+            action, reason, call_id, llm_status, llm_budget = ask_model(
+                rnd, evidence, exp, fallback, fallback_reason,
+                allowed=("retrain_300", "noop"))
         else:
             fallback, fallback_reason = choose_by_rules(exp, key, evidence)
             action, reason, call_id, llm_status, llm_budget = ask_model(
@@ -479,8 +492,6 @@ def run_round(rnd) -> dict:
     accepted = False
     metrics = {}
     epochs = 0
-    b_rung = 0
-    b_wd = 0.0
     try:
         if candidate.exists():
             shutil.rmtree(candidate, ignore_errors=True)
@@ -489,18 +500,11 @@ def run_round(rnd) -> dict:
         parent_found = parent is not None
         if parent is not None:
             _log("parent=%s sha256=%s" % (parent, _sha256_file(parent)[:16]))
-        # B 的档位：用"这一档之前试过几次"定位，与规则层同一口径（每轮前进一档）。
-        b_rung = min(_verdict(exp, "b_ladder")["tries"], len(B_LADDER) - 1)
-        if action == "b_ladder" and parent is None:
-            b_rung = 0
         if action == "noop" or parent is None:
             # 只交父检查点本身：round 的候选必须是"父模型"或"官方 train_run
             # 从父模型续训得到的产物"，不能是任何手工变换过的权重文件
             # （平台按续训要求审核，手工改造的 checkpoint 会被判非合规）。
-            if key == "B" and best_prev.is_file():
-                shutil.copyfile(best_prev, candidate / "checkpoint.npz")
-                reason = reason + "（不训练，提交已缓存的历史最优候选）"
-            elif parent is not None:
+            if parent is not None:
                 shutil.copyfile(parent, candidate / "checkpoint.npz")
                 reason = reason + "（不训练，提交父检查点原样）"
         else:
@@ -523,46 +527,35 @@ def run_round(rnd) -> dict:
                 parent_meta = {}
             lr = float(parent_meta.get("learning_rate") or 0.003)
             bs = int(parent_meta.get("batch_size") or 0) or None
-            b_wd = 0.0
-            if action == "b_ladder":
-                # 只换损失（MAE）与正则（L2），起点、学习率、批量都照抄父检查点。
-                b_wd, epochs = B_LADDER[b_rung]
-                from b_regularized import train_run as train_run_b
-                report = train_run_b(key, train_path, val_path, out, resume=str(parent),
-                                     epochs=epochs, learning_rate=lr, batch_size=bs,
-                                     loss="mae", weight_decay=b_wd,
-                                     stage_id=f"r{rnd.round_index}")
-            elif action == "c_long":
+            if action == "c_long":
                 from c_long import train_run as train_run_c
                 report = train_run_c(key, train_path, val_path, out, resume=str(parent),
                                      epochs=epochs, learning_rate=0.002, batch_size=bs,
                                      stage_id=f"r{rnd.round_index}")
             else:
                 from baselines.train import train_run  # 官方实现，镜像内 /app/baselines
+                kwargs = {}
+                if key == "B":
+                    # 官方 train.py 对 B 要求显式声明标签来源（不许"偷偷从 RUL 派生"）。
+                    # 我们用的就是数据包里给的官方 RUL 标签，原样不改，如实声明。
+                    prov = work / "label_provenance.json"
+                    prov.write_text(json.dumps({
+                        "status": "approved",
+                        "method": "platform-provided official RUL labels from "
+                                  "public/train.jsonl; used as-is, no relabeling "
+                                  "or target transformation",
+                    }, ensure_ascii=False), encoding="utf-8")
+                    kwargs["label_provenance"] = str(prov)
                 report = train_run(key, train_path, val_path, out, resume=str(parent),
                                    epochs=epochs, learning_rate=lr, batch_size=bs,
-                                   stage_id=f"r{rnd.round_index}")
+                                   stage_id=f"r{rnd.round_index}", **kwargs)
             trained = True
             before = report.get("validation_before") or {}
             after = report.get("validation_after") or {}
             metrics = {"before": before, "after": after}
-            # 只有验证集分数真的变好才采纳（C 的 300 轮已在开工前验证过，仍走同一道门）。
-            # B 例外：平台的父产物在 B 上没能逐轮链上，before 恒为基线分，若拿它当基准，
-            # 任何一档都会"接受"，最后一档会覆盖历史最优。所以 B 用 min(before, 历史最优)。
-            if action == "b_ladder":
-                cur = after.get("rmse")
-                hist = exp.get("b_best_rmse")
-                cands = [x for x in (before.get("rmse"), hist) if isinstance(x, (int, float))]
-                base = min(cands) if cands else None
-                accepted = bool(cur is not None and base is not None
-                                and float(cur) < float(base) - 1e-9)
-                if accepted:
-                    exp["b_best_rmse"] = float(cur)
-                _log("b gate: after=%s base=%s accepted=%s"
-                     % (("%.4f" % float(cur)) if cur is not None else "-",
-                        ("%.4f" % float(base)) if base is not None else "-", accepted))
-            else:
-                accepted = _better(key, after, before)
+            # 只有训练报告里那份**固定验证集**上的分数真的变好才采纳；不额外拿
+            # 平台当轮下发的新验证流重新打分挑模型（那等于在验证集上挑）。
+            accepted = _better(key, after, before)
             guard = report.get("guard") or {}
             if action == "c_long" and guard.get("collapsed"):
                 accepted = False
@@ -572,20 +565,16 @@ def run_round(rnd) -> dict:
                 _log("c_long kept_best_epoch=%s final_epoch=%s pred_std=%.3f"
                      % (report.get("kept_best_epoch"), report.get("final_epochs"),
                         float((report.get("guard") or {}).get("pred_std", 0))))
-            _log("train action=%s rung=%s wd=%s epochs=%s before=%s after=%s accepted=%s"
-                 % (action, b_rung + 1 if action == "b_ladder" else "-", b_wd, epochs,
-                    _fmt(key, before), _fmt(key, after), accepted))
+            _log("train action=%s epochs=%s before=%s after=%s accepted=%s"
+                 % (action, epochs, _fmt(key, before), _fmt(key, after), accepted))
             src = out / "checkpoint.npz"
             if accepted:
                 shutil.copyfile(src, candidate / "checkpoint.npz")
                 shutil.copyfile(out / "training.json", candidate / "training.json")
-            elif key == "B" and best_prev.is_file():
-                shutil.copyfile(best_prev, candidate / "checkpoint.npz")
-                reason = reason + ("（本轮 %s 未刷新历史最优，回退到已缓存的最优候选）"
-                                   % _fmt(key, after))
             else:
+                # 未过门就交父检查点原样（父检查点就是平台上一轮/官方给的那份）。
                 shutil.copyfile(parent, candidate / "checkpoint.npz")
-                reason = reason + f"（续训后未优于父模型：{_fmt(key, before)} → {_fmt(key, after)}，已回退）"
+                reason = reason + f"（续训后未优于固定验证集上的父模型：{_fmt(key, before)} → {_fmt(key, after)}，已回退）"
     except Exception as exc:
         # 训练失败：交父模型，别让这一轮白跑
         failed = True
@@ -655,9 +644,7 @@ def run_round(rnd) -> dict:
             hypothesis=reason,
             change_summary=f"{action}；接受={accepted}；{observable}",
             configuration={"dataset_key": key, "action": action,
-                           "epochs": epochs if trained else 0,
-                           "b_ladder_rung": (b_rung + 1) if action == "b_ladder" else 0,
-                           "weight_decay": b_wd},
+                           "epochs": epochs if trained else 0},
             seed=1,
             checkpoint_paths=["checkpoint.npz"],
             predict_argv=["python3", "/app/harness.py", "predict"],
@@ -666,16 +653,9 @@ def run_round(rnd) -> dict:
         # 只提交一次；失败就如实上报，不换占位文件重试。
         fatal.append("submit %s: %s" % (type(exc).__name__, exc))
 
-    # /state 是整目录替换（save_state 会清空重写），所以每轮都要把 B 的最优权重
-    # 写回去：本轮刷新了就写新的，没刷新就把上一轮那份原样带下去。否则一次拒绝
-    # 就会把缓存清掉，下一轮只能退回父检查点（在 B 上=官方基线）。
-    extra = {}
-    if key == "B":
-        if accepted and (candidate / "checkpoint.npz").is_file():
-            extra["b_best.npz"] = candidate / "checkpoint.npz"
-        elif best_prev.is_file():
-            extra["b_best.npz"] = best_prev
-    save_experience(rnd, work, exp, extra)
+    # /state 留给下一轮的经验表使用；这里不再缓存任何"历史最优权重"——每轮提交的
+    # 候选只能是父检查点或由父检查点续训得到的产物，缓存再提交会造成跨轮权重来源混乱。
+    save_experience(rnd, work, exp)
 
     _log("submit artifact=%s calls=%d fatal=%d elapsed=%.1fs"
          % ((submitted or {}).get("artifact_id", "none"),

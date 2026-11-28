@@ -1,10 +1,11 @@
-"""Submission entry: step-1 protocol shell + step-3 predict wired to net.py.
-
-train(rnd) : still the placeholder from step 1 (step 4 replaces it with the five-ring loop)
-predict()  : pure numpy forward, byte-compatible with the frozen image 1.3
+"""Submission entry: predict is a straight forward pass, train delegates to the loop.
 
 Rules baked in here:
-  * never raise out of predict() — the SDK kills the whole measurement on one bad line
+  * predict() returns exactly what the checkpoint computes — no post-processing,
+    no rescaling, no calibration against request metadata.
+  * a missing/broken checkpoint or a schema mismatch raises with the concrete
+    reason instead of substituting a constant, so a loading bug can never be
+    disguised as a valid prediction.
   * classification returns a 6-item list, regression returns {"value": float}
   * pick the checkpoint by dataset_key when present, else by input schema
 """
@@ -18,15 +19,11 @@ from net import Model, flatten
 
 PREDICT_ARGV = ["python3", "/app/harness.py", "predict"]
 
-LABELS = ("Ethanol", "Ethylene", "Ammonia", "Acetaldehyde", "Acetone", "Toluene")
-
 _HERE = Path(__file__).resolve().parent
 _CHECKPOINT_DIRS = (
     Path("/app/checkpoints"),
     _HERE / "checkpoints",
 )
-
-_MESSAGES = "本轮训练只需确认协议已通。请只回复两个字：收到。"
 
 
 # ----------------------------------------------------------------- prediction
@@ -61,25 +58,20 @@ _MODELS = {}
 
 def _load(key):
     if key is None:
-        return None
+        raise RuntimeError("cannot tell which dataset this sample belongs to")
     if key in _MODELS:
         return _MODELS[key]
-    model = None
+    errors = []
     for path in _candidate_paths(key):
         try:
             model = Model(str(path))
-            break
-        except Exception:
+        except Exception as exc:                       # noqa: BLE001 - reported below
+            errors.append("%s: %s: %s" % (path, type(exc).__name__, exc))
             continue
-    _MODELS[key] = model
-    return model
-
-
-def _fallback(sample):
-    if sample.task == "regression":
-        return {"outputs": {"value": 0.0}}
-    return {"outputs": [{"label": LABELS[0], "score": 1.0}] +
-                       [{"label": label, "score": 0.0} for label in LABELS[1:]]}
+        _MODELS[key] = model
+        return model
+    raise RuntimeError("no usable checkpoint for dataset %s (%s)"
+                       % (key, "; ".join(errors) or "no path tried"))
 
 
 def _answer(sample, model):
@@ -92,27 +84,22 @@ def _answer(sample, model):
     if getattr(model, "task", None) == "regression":
         value = float(out)
         if not math.isfinite(value) or value < 0:
-            raise ValueError("bad regression value")
+            raise ValueError("bad regression value: %r" % (out,))
         return {"outputs": {"value": value}}
     return {"outputs": [{"label": label, "score": float(score)}
                         for label, score in zip(model.classes, out)]}
 
 
 def predict(sample, model_dir):
-    """Return one validated prediction. Never raises."""
+    """Return the model's own prediction. Raises on any problem, by design."""
     del model_dir  # the artifact path comes from CONTEST_ARTIFACT_PATH
-    try:
-        model = _load(_pick_key(sample))
-        if model is None:
-            return _fallback(sample)
-        result = _answer(sample, model)
-        if sample.task == "regression" and "value" not in result["outputs"]:
-            return _fallback(sample)
-        if sample.task == "classification" and not isinstance(result["outputs"], list):
-            return _fallback(sample)
-        return result
-    except Exception:
-        return _fallback(sample)
+    model = _load(_pick_key(sample))
+    result = _answer(sample, model)
+    if sample.task == "regression" and "value" not in result["outputs"]:
+        raise RuntimeError("regression result without a value")
+    if sample.task == "classification" and not isinstance(result["outputs"], list):
+        raise RuntimeError("classification result is not a list")
+    return result
 
 
 # -------------------------------------------------------------------- training
