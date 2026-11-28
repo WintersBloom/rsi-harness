@@ -74,12 +74,40 @@ def _load(key):
                        % (key, "; ".join(errors) or "no path tried"))
 
 
+def _apply_regime(x, table, slack=1.5):
+    """按该行 settings 所属工况做 z-score（只用到输入里的 settings，不涉及标签）。
+
+    工况可能不在训练集的 7 个里（隐藏流换了一个工况、或 settings 差一点），
+    此时若硬用最近的簇统计量，量纲会算错、预测整体偏移——那比不标准化更差，
+    而且只发生在我们看不到的数据上。所以超出该簇 radius*slack 时退回全局统计量。
+    """
+    keys = np.asarray(table["keys"], dtype=np.float64)
+    mean = np.asarray(table["mean"], dtype=np.float64)
+    std = np.asarray(table["std"], dtype=np.float64)
+    radius = np.asarray(table.get("radius") or [np.inf] * len(mean), dtype=np.float64)
+    idx = table.get("settings_idx") or [-3, -2, -1]
+    idx = [i if i >= 0 else x.shape[1] + i for i in idx]
+    settings = np.round(np.asarray(x, dtype=np.float64)[:, idx], 1)
+    distance = ((((settings[:, None, :] - keys[None, :, :]) ** 2).sum(axis=2)) ** 0.5)
+    nearest = distance.argmin(axis=1)
+    out = (x - mean[nearest]) / std[nearest]
+    far = distance[np.arange(len(nearest)), nearest] > (radius[nearest] * slack)
+    if far.any():
+        gmean = np.asarray(table["gmean"], dtype=np.float64)
+        gstd = np.asarray(table["gstd"], dtype=np.float64)
+        out[far] = (x[far] - gmean) / gstd
+    return out
+
+
 def _answer(sample, model):
     paths, values = flatten(sample.inputs)
     model.check_schema(paths)
     x = np.asarray([values], dtype=np.float64)
     if not np.isfinite(x).all():
         raise ValueError("non-finite feature")
+    table = model.meta.get("regime_table")
+    if table:
+        x = _apply_regime(x, table)
     out = model.predict(x)[0]
     if getattr(model, "task", None) == "regression":
         value = float(out)

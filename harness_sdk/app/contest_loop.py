@@ -109,7 +109,7 @@ def save_experience(rnd, work: Path, exp: dict, extra: dict | None = None) -> No
 # A 是多分类（argmax，没有阈值可调）、B/C 是回归（没有阈值），该动作在任何一包上
 # 都没有对应的执行语义，因此移除。
 # 留作记录：从别的任务搬来的动作，要先证明它在新任务的输出空间里有定义。
-ACTIONS = ("noop", "retrain_20", "retrain_10", "retrain_300", "c_long")
+ACTIONS = ("noop", "retrain_20", "retrain_10", "retrain_300", "c_regime")
 
 # 系统提示只做一件事：把"先思考再回答"压成"直接回答"。
 # 实测（PyTRiO 真实端点，2026-11-28）：同一份用户消息，不加这条 system 时 27B 会把
@@ -120,7 +120,7 @@ _SYSTEM_PROMPT = (
 )
 
 # 每个动作对应的续训轮数（官方 train_run 的 epochs）。
-EPOCHS = {"retrain_10": 10, "retrain_20": 20, "retrain_300": 300, "c_long": 900}
+EPOCHS = {"retrain_10": 10, "retrain_20": 20, "retrain_300": 300, "c_regime": 300}
 
 # 噪声带：改进量小于它就算"没动"。
 # A 包是 macro-F1 的 bootstrap SE（n=1244、F1≈0.72 时算得 ±1.27pp）；
@@ -228,19 +228,23 @@ def choose_by_rules(exp: dict, key: str, evidence: dict) -> tuple[str, str]:
     # 超参，每轮从平台给的父检查点真训一次，能不能提升由训练报告里的固定验证集
     # 分数决定（不接受就在下一轮交回父检查点），不换损失、不加正则、不压权重。
     if key == "B":
-        if _verdict(exp, "retrain_20")["status"] != "dead":
-            return "retrain_20", ("B 包常规续训：官方 MSE 训练器、父权重超参、20 轮；"
-                                  "只有固定验证集上比父模型好才采纳")
+        if _verdict(exp, "retrain_300")["status"] != "dead":
+            return "retrain_300", ("B 包常规续训：官方 MSE 训练器、父权重超参、300 轮"
+                                   "（实测公开验证集 681.16→596.34，20 轮只会更差 689.16）；"
+                                   "只有固定验证集上比父模型好才采纳")
         return "noop", "B 的常规续训方向已判死（R1），本轮保留父检查点"
 
-    # R0 C 包：官方 C 权的验证曲线在 15 轮之后仍在缓慢下降（15→315 轮，52.87→50.65），
-    # 但那是"一次训 300 轮"的结果。实测把它拆成 10 次 30 轮（每次从上一轮续训）会越训越差
-    # （公开验证集 50.93 → 53.53），所以 C 只在第一轮一次性走完 300 轮，之后保留父检查点。
+    # R0 C 包：官方 C 权在 15 轮后仍在缓慢下降（15→315 轮，52.87→50.65）。
+    # 实测把它拆成 10 次 30 轮会越训越差（50.93 → 53.53），所以 C 只在第一轮一次性走完，
+    # 之后保留父检查点。现在这一次用的是按工况分段标准化的续训（c_regime）：
+    # FD002/FD004 是 6 种工况混采，全局归一化把它们搅在一起；改成按 settings 判工况、
+    # 工况内 z-score 后再训 300 轮，公开验证集 52.87 → 46.40（实测）。
     if key == "C":
-        if _verdict(exp, "c_long")["tries"] == 0:
-            return "c_long", ("C 只跑一次长程续训：lr 0.002、900 轮、结束时回滚到验证最好那一轮"
-                              "（实测公开验证集 50.93→50.07），并带常数塌陷护栏")
-        return "noop", "C 的长程续训已跑完，本轮保留当前最优检查点"
+        if _verdict(exp, "c_regime")["tries"] == 0:
+            return "c_regime", ("C 只跑一次续训：按工况分段标准化 + lr 0.002、300 轮、"
+                                "结束时回滚到验证最好那一轮（实测公开验证集 52.87→46.40），"
+                                "并带常数塌陷护栏")
+        return "noop", "C 的续训已跑完，本轮保留当前最优检查点"
     if key == "A":
         # A 的节奏：先小步摸方向，走完两档小步之后才上大步。
         #
@@ -470,17 +474,17 @@ def run_round(rnd) -> dict:
             fallback, fallback_reason = choose_by_rules(exp, key, evidence)
             action, reason, call_id, llm_status, llm_budget = ask_model(
                 rnd, evidence, exp, fallback, fallback_reason,
-                allowed=("retrain_20", "noop"))
+                allowed=("retrain_300", "noop"))
         elif key == "C":
             # C 只允许一次长程续训：跑过之后候选集里只剩 noop，模型只能在"不动"里选。
             # 之前不限制，模型在第 8/9/10 轮又选了 retrain_300（接受门当时只看 RMSE，
             # 三次都被判接受），把隐藏流 NASA 从 5.6e9 拉到 1.33e11 —— 最好的 C 模型
             # 第 1 轮就拿到了，后面三次重训把它弄坏了（正式评测最差阶段 −2.162 的由来）。
             fallback, fallback_reason = choose_by_rules(exp, key, evidence)
-            ran = _verdict(exp, "c_long")["tries"] > 0
+            ran = _verdict(exp, "c_regime")["tries"] > 0
             action, reason, call_id, llm_status, llm_budget = ask_model(
                 rnd, evidence, exp, fallback, fallback_reason,
-                allowed=("noop",) if ran else ("c_long", "noop"))
+                allowed=("noop",) if ran else ("c_regime", "noop"))
         elif key == "A":
             # A 的候选是四档：短程 / 中程 / 大步 / 不动。
             #
@@ -553,8 +557,8 @@ def run_round(rnd) -> dict:
                 parent_meta = {}
             lr = float(parent_meta.get("learning_rate") or 0.003)
             bs = int(parent_meta.get("batch_size") or 0) or None
-            if action == "c_long":
-                from c_long import train_run as train_run_c
+            if action == "c_regime":
+                from c_regime import train_run as train_run_c
                 report = train_run_c(key, train_path, val_path, out, resume=str(parent),
                                      epochs=epochs, learning_rate=0.002, batch_size=bs,
                                      stage_id=f"r{rnd.round_index}")
@@ -583,12 +587,12 @@ def run_round(rnd) -> dict:
             # 平台当轮下发的新验证流重新打分挑模型（那等于在验证集上挑）。
             accepted = _better(key, after, before)
             guard = report.get("guard") or {}
-            if action == "c_long" and guard.get("collapsed"):
+            if action == "c_regime" and guard.get("collapsed"):
                 accepted = False
                 _log("guard: C 训练塌成常数（pred_std=%.3f < %.1f），本轮不提交"
                      % (float(guard.get("pred_std", 0)), float(guard.get("min_pred_std", 1))))
-            if action == "c_long":
-                _log("c_long kept_best_epoch=%s final_epoch=%s pred_std=%.3f"
+            if action == "c_regime":
+                _log("c_regime kept_best_epoch=%s final_epoch=%s pred_std=%.3f"
                      % (report.get("kept_best_epoch"), report.get("final_epochs"),
                         float((report.get("guard") or {}).get("pred_std", 0))))
             _log("train action=%s epochs=%s before=%s after=%s accepted=%s"
