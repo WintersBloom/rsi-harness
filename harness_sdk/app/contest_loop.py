@@ -201,6 +201,13 @@ def choose_by_rules(exp: dict, key: str, evidence: dict) -> tuple[str, str]:
 
     # R1 方向判死：某方向连续 2 次超出噪声带的退步 ⇒ 永久排除。
     if v20["status"] == "dead" and v10["status"] != "dead":
+        # A 包的特例：retrain_20 判死后如果死揪着 retrain_10 不放，会陷入
+        # "retrain_10 被拒 → 下一轮还 retrain_10"的循环（实测 sdk21 验证里
+        # r4/r5/r6 连着三次 retrain_10，永远轮不到 retrain_300）。
+        # 小步已经被拒到没有新信息时，就该放大步子——大步是对"小步不够"的回应。
+        if key == "A" and int(v10["rejects"]) >= 2:
+            return "retrain_300", ("retrain_20 已判死（R1），retrain_10 也已连续 "
+                                   f"{v10['rejects']} 次被拒，本轮改用大步续训 300 轮")
         return "retrain_10", f"retrain_20 连续 {v20['rejects']} 次退步已判死（R1），本轮换短程续训"
     if v20["status"] == "dead" and v10["status"] == "dead":
         return "noop", "retrain_20 与 retrain_10 均已判死（R1），本轮保留父模型"
@@ -235,9 +242,26 @@ def choose_by_rules(exp: dict, key: str, evidence: dict) -> tuple[str, str]:
                               "（实测公开验证集 50.93→50.07），并带常数塌陷护栏")
         return "noop", "C 的长程续训已跑完，本轮保留当前最优检查点"
     if key == "A":
-        # A 的默认节奏是大步：两次运行的逐轮记录显示 7×300 得 0.8976、8×10 得 0.8780，
-        # 且小步只是因为 r3 偶然被接受才锁住路径。候选集也只给两种（见 ask_model 调用处）。
-        return "retrain_300", "无历史否决信号，A 包按默认节奏大步续训 300 轮"
+        # A 的节奏：先小步摸方向，走完两档小步之后才上大步。
+        #
+        # 教训（sdk20 试运行 run 1b0ca9f5）：当时把候选集收成 ("retrain_300","noop")，
+        # 规则默认节奏也是 retrain_300，于是 r1 就在 445 条上跑 300 轮、F1 掉到
+        # 0.5852 被拒；R3 随即要求 r2 noop，而剩下的候选里 retrain_300 已有拒绝记录、
+        # 模型每轮都选 noop —— **十轮全 noop、交基线权重，隐藏流 0.8976→0.357**。
+        # 根因不是模型选错，是"动作集宽 2 + R3 = 第一次失败后再无路可走"。
+        #
+        # 正式 #1 的真实序列是 retrain_10(拒) → retrain_20(拒) → noop → retrain_300×7
+        # （0.8976），大步是在两档小步都被否掉之后才被选中的。这里按同样的节奏给默认值。
+        # 只数"两档小步"各自试过几次，**不数 noop**：R3 会在每次小步被拒后插一轮
+        # noop，如果把 noop 也算进"已试轮数"，中步 retrain_20 会被整体跳过
+        # （实测序列 retrain_10 → noop → retrain_300，中步一次都没跑到）。
+        small = (int(_verdict(exp, "retrain_10")["tries"])
+                 + int(_verdict(exp, "retrain_20")["tries"]))
+        if small <= 0:
+            return "retrain_10", "首轮无历史，A 包先以小预算建立基线并观察收益"
+        if small == 1:
+            return "retrain_20", "已试过短程续训，本轮换中程看是否有更大收益"
+        return "retrain_300", "两档小步已试过，按默认节奏大步续训 300 轮"
     return "retrain_20", "无历史否决信号，按默认节奏续训 20 轮"
 
 
@@ -458,16 +482,18 @@ def run_round(rnd) -> dict:
                 rnd, evidence, exp, fallback, fallback_reason,
                 allowed=("noop",) if ran else ("c_long", "noop"))
         elif key == "A":
-            # A 的候选限定为「大步重训 / 不动」二选一。依据是两次运行的逐轮记录：
-            # 每轮训练都从平台给的父模型重启、Adam 状态不继承，所以 8 次 10 epoch
-            # 只是 8 次小扰动，不等于 80 epoch。正式 #1 走 7 次 retrain_300（隐藏流
-            # Macro-F1 0.8976），sdk16 走 8 次 retrain_10（0.8780）——小步在大步面前
-            # 一次都没赢过。sdk16 之所以切到小步，是 r3 那次 retrain_10 恰好被接受
-            # （+0.218）把路径锁住了，这里直接把这个偶然排除。
+            # A 的候选是四档：短程 / 中程 / 大步 / 不动。
+            #
+            # 这里曾经收成 ("retrain_300","noop")，理由是"正式 #1 走 7 次 300 轮拿了
+            # 0.8976，小步一次都没赢过"。但那只适用于**数据已经累积之后**的几轮：
+            # sdk20 试运行（run 1b0ca9f5）在 r1 就用 300 轮打 445 条，F1 掉到 0.5852
+            # 被拒，R3 随即锁进 noop，**此后十轮全 noop、提交基线权重，隐藏流 0.8976→0.357**。
+            # 正确的读法不是"大步更好"，而是"大步要等数据够了才好"——所以四档全留，
+            # 由 untried 与经验表去决定什么时候换档。
             fallback, fallback_reason = choose_by_rules(exp, key, evidence)
             action, reason, call_id, llm_status, llm_budget = ask_model(
                 rnd, evidence, exp, fallback, fallback_reason,
-                allowed=("retrain_300", "noop"))
+                allowed=("retrain_10", "retrain_20", "retrain_300", "noop"))
         else:
             fallback, fallback_reason = choose_by_rules(exp, key, evidence)
             action, reason, call_id, llm_status, llm_budget = ask_model(
